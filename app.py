@@ -248,6 +248,12 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
     stops_set = set(stops_names)
     net = [g - r for g, r in zip(history["energy_kwh"], history["regen_kwh"])]
 
+    # --- Add margin/buffer to X-Axis to prevent clipping at the start and end ---
+    total_duration = history["time_s"][-1]
+    buffer_seconds = max(30, int(total_duration * 0.02))  # Add 2% padding, minimum 30 seconds
+    t_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
+    t_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
+
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
 
     fig.add_trace(
@@ -288,7 +294,7 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
 
             annotations.append(dict(
                 x=t_dt, y=-0.06, xref="x", yref="y domain",
-                text=station["name"].title(),  # Title case for capitalization
+                text=station["name"].title(),
                 showarrow=False, font=dict(size=11, color=color),
                 xanchor="center", yanchor="top"
             ))
@@ -298,8 +304,8 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
     fig.update_layout(
         height=700, margin=dict(l=40, r=40, t=40, b=80), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(showgrid=True, gridcolor="#30363d", tickformat="%M:%S"),
-        xaxis2=dict(showgrid=True, gridcolor="#30363d", title="Time (MM:SS)", tickformat="%M:%S"),
+        xaxis=dict(showgrid=True, gridcolor="#30363d", tickformat="%M:%S", range=[t_min, t_max]),
+        xaxis2=dict(showgrid=True, gridcolor="#30363d", title="Time (MM:SS)", tickformat="%M:%S", range=[t_min, t_max]),
         yaxis=dict(title="Speed (km/h)", showgrid=True, gridcolor="#30363d"),
         yaxis2=dict(title="Energy (kWh)", showgrid=True, gridcolor="#30363d"),
         shapes=shapes, annotations=annotations
