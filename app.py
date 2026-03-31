@@ -282,7 +282,7 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
     for station in all_stations:
         if station["type"] not in ["X", "R"]: continue
         skm = station["km"]
-        color = "#ffffff" if station["type"] == "X" else ("#79c0ff" if station["name"] in stops_set else "#484f58")
+        color = "#000000" if station["type"] == "X" else ("#79c0ff" if station["name"] in stops_set else "#484f58")
         try:
             idx = (np.abs(np.array(history["km"]) - skm)).argmin()
             t_dt = time_dt_arr[idx]
