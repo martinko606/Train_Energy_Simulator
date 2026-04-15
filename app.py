@@ -14,11 +14,13 @@ import streamlit as st
 PREDEFINED_VEHICLES = {
     "EDITA": {
         "traction": "DIESEL", "mass": 22000, "length": 15,
-        "power": 152, "aux_power": 20, "accel": 0.5, "decel": 0.8
+        "power": 152, "aux_power": 20, "accel": 0.5, "decel": 0.8,
+        "efficiency": 0.30
     },
     "EDITA+Btax": {
         "traction": "DIESEL", "mass": 42000, "length": 30,
-        "power": 152, "aux_power": 25, "accel": 0.4, "decel": 0.8
+        "power": 152, "aux_power": 25, "accel": 0.4, "decel": 0.8,
+        "efficiency": 0.30
     },
 }
 
@@ -27,8 +29,8 @@ PREDEFINED_VEHICLES = {
 # ==========================================
 st.set_page_config(page_title="Railway Energy Simulator", layout="wide")
 
-if "journey_legs" not in st.session_state:
-    st.session_state.journey_legs = []
+if "journey_results" not in st.session_state:
+    st.session_state.journey_results = []
 
 
 # ==========================================
@@ -112,11 +114,12 @@ class TrackProfile:
 
 
 class TrainSimulator:
-    def __init__(self, mass_kg, length_m, max_power_kw, aux_power_kw, max_accel, max_decel, traction_type):
+    def __init__(self, mass_kg, length_m, max_power_kw, aux_power_kw, max_accel, max_decel, traction_type, efficiency):
         self.mass_kg = mass_kg
         self.eff_mass = self.mass_kg * 1.08
         self.A, self.B, self.C = 1500, 30, 4
-        self.traction_efficiency = 0.85
+        # We use the specific efficiency parameter here for general power transmission
+        self.traction_efficiency = efficiency if traction_type == "ELECTRIC" else 0.85
         self.regen_efficiency = 0.75 if traction_type == "ELECTRIC" else 0.0
         self.aux_power_w = aux_power_kw * 1000
         self.max_power_w = max_power_kw * 1000
@@ -283,7 +286,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         x_title = "Distance (km)"
         x_format = None
 
-        # We can now reduce vertical spacing since names are safely inside the top graph
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
 
     fig.add_trace(
@@ -327,13 +329,12 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
             shapes.append(dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos, y0=0, y1=e_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
 
-            # Place the text INSIDE the top graph, just slightly above the 0 line
             annotations.append(dict(
                 x=x_pos, y=0.03, xref="x", yref="y domain",
                 text=f" {station['name'].title()} ",
                 showarrow=False, font=dict(size=11, color=color),
                 xanchor="center", yanchor="bottom",
-                bgcolor="rgba(0,0,0,0.4)"  # Subtle translucent background so graph lines don't obscure text
+                bgcolor="rgba(0,0,0,0.4)"
             ))
         except ValueError:
             pass
@@ -341,7 +342,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
     fig.update_layout(
         height=750, margin=dict(l=40, r=40, t=40, b=40), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        # Title is now safely placed on BOTH graphs
         xaxis=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
         xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
         yaxis=dict(title="Speed (km/h)", showgrid=True),
@@ -386,6 +386,14 @@ if vehicle_choice == "Custom":
     aux_power = st.sidebar.number_input("Auxiliary Power (kW)", value=40, step=5)
     accel = st.sidebar.slider("Max Acceleration (m/s²)", 0.2, 1.2, 0.6, 0.1)
     decel = st.sidebar.slider("Max Braking (m/s²)", 0.4, 1.5, 0.8, 0.1)
+
+    # Custom Efficiency
+    if traction == "DIESEL":
+        efficiency = st.sidebar.slider("Thermal Efficiency (%)", 15, 60, 35) / 100.0
+        diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0, step=0.1)
+    else:
+        efficiency = st.sidebar.slider("Grid-to-Wheel Efficiency (%)", 50, 95, 85) / 100.0
+        diesel_density = 10.0  # Unused for electric
 else:
     preset = PREDEFINED_VEHICLES[vehicle_choice]
     traction = preset["traction"]
@@ -395,84 +403,115 @@ else:
     aux_power = preset["aux_power"]
     accel = preset["accel"]
     decel = preset["decel"]
-    st.sidebar.info(f"**{vehicle_choice} specs loaded.**")
+    efficiency = preset["efficiency"]
 
-st.sidebar.header("2. Route Settings")
+    st.sidebar.info(f"**{vehicle_choice} specs loaded:**\n"
+                    f"- Traction: {traction}\n"
+                    f"- Efficiency: {int(efficiency * 100)}%\n"
+                    f"- Mass: {mass:,} kg\n"
+                    f"- Power: {power} kW\n"
+                    f"- Aux Power: {aux_power} kW")
 
-# Lock the start station if we already have legs in the journey!
-if st.session_state.journey_legs:
-    last_leg_end = st.session_state.journey_legs[-1]["end_name"]
-    start_name = st.sidebar.selectbox("Start Station (Locked to previous)", [last_leg_end], disabled=True)
-else:
-    start_name = st.sidebar.selectbox("Start Station", station_names, index=0)
+    if traction == "DIESEL":
+        diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0, step=0.1)
+    else:
+        diesel_density = 10.0
 
-end_name = st.sidebar.selectbox("End Station", station_names, index=len(station_names) - 1)
-start_km = station_dict[start_name]
-end_km = station_dict[end_name]
-
-st.sidebar.header("3. Stop Policy")
-mode = st.sidebar.selectbox("Request Stop Mode", ["random", "all", "none"], index=0)
-prob = st.sidebar.slider("Request Probability", 0.0, 1.0, 0.6, 0.05, disabled=(mode != "random"))
-dwell = st.sidebar.number_input("Dwell Time (s)", value=30, step=5)
-
-st.sidebar.header("4. Display Options")
+st.sidebar.header("2. Display Options")
 x_axis_choice = st.sidebar.radio("X-Axis Display", ["Time (MM:SS)", "Distance (km)"])
 
-st.sidebar.markdown("---")
-col_add, col_reset = st.sidebar.columns(2)
+st.sidebar.header("3. Itinerary Builder")
+num_legs = st.sidebar.number_input("Number of Legs", min_value=1, max_value=15, value=1)
 
-if col_reset.button("🗑️ Reset", use_container_width=True):
-    st.session_state.journey_legs = []
-    st.rerun()
+itinerary_config = []
+for i in range(num_legs):
+    with st.sidebar.expander(f"Leg {i + 1} Configuration", expanded=(i == 0)):
+        if i == 0:
+            start_station = st.selectbox(f"Start Station", station_names, key=f"start_{i}")
+        else:
+            prev_end = itinerary_config[i - 1]["end"]
+            start_station = st.selectbox(f"Start Station (Auto-linked)", station_names,
+                                         index=station_names.index(prev_end), key=f"start_{i}")
 
-if col_add.button("▶ Add Leg", type="primary", use_container_width=True):
-    if start_km == end_km:
-        st.warning("Start and End stations cannot be the same!")
-        st.stop()
+        default_end = len(station_names) - 1 if i == 0 else 0
+        end_station = st.selectbox(f"End Station", station_names, index=default_end, key=f"end_{i}")
 
-    with st.spinner("Simulating..."):
-        is_fwd = start_km > end_km
-        track = TrackProfile("track_profile.xlsx", is_forward_direction=is_fwd)
-        sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction)
+        mode = st.selectbox(f"Request Stop Mode", ["random", "all", "none"], key=f"mode_{i}")
+        prob = st.slider(f"Probability", 0.0, 1.0, 0.6, 0.05, disabled=(mode != "random"), key=f"prob_{i}")
+        dwell = st.number_input(f"Dwell Time (s)", value=30, step=5, key=f"dwell_{i}")
 
-        history, stops, stats_curr = sim.run_simulation(track, start_km, end_km, mode, prob, dwell)
-        _, _, stats_all = sim.run_simulation(track, start_km, end_km, "all", 1.0, dwell)
-        _, _, stats_none = sim.run_simulation(track, start_km, end_km, "none", 0.0, dwell)
-
-        # Save this leg to memory
-        st.session_state.journey_legs.append({
-            "start_name": start_name, "end_name": end_name,
-            "traction": traction, "mode": mode, "prob": prob,
-            "history": history, "stops": stops, "stats_curr": stats_curr,
-            "stats_all": stats_all, "stats_none": stats_none
+        itinerary_config.append({
+            "start": start_station,
+            "start_km": station_dict[start_station],
+            "end": end_station,
+            "end_km": station_dict[end_station],
+            "mode": mode,
+            "prob": prob,
+            "dwell": dwell
         })
+
+# --- RUN BUTTON ---
+if st.sidebar.button("▶ Run Full Itinerary", type="primary", use_container_width=True):
+    for idx, leg in enumerate(itinerary_config):
+        if leg["start_km"] == leg["end_km"]:
+            st.sidebar.error(f"Error in Leg {idx + 1}: Start and End stations cannot be the same!")
+            st.stop()
+
+    st.session_state.journey_results = []
+
+    with st.spinner("Calculating Physics for Full Itinerary..."):
+        try:
+            for idx, leg_cfg in enumerate(itinerary_config):
+                is_fwd = leg_cfg["start_km"] > leg_cfg["end_km"]
+                track = TrackProfile("track_profile.xlsx", is_forward_direction=is_fwd)
+                sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
+
+                history, stops, stats_curr = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"],
+                                                                leg_cfg["mode"], leg_cfg["prob"], leg_cfg["dwell"])
+                _, _, stats_all = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"], "all", 1.0,
+                                                     leg_cfg["dwell"])
+                _, _, stats_none = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"], "none", 0.0,
+                                                      leg_cfg["dwell"])
+
+                st.session_state.journey_results.append({
+                    "leg_num": idx + 1,
+                    "config": leg_cfg,
+                    "traction": traction,
+                    "efficiency": efficiency,
+                    "diesel_density": diesel_density,
+                    "history": history,
+                    "stops": stops,
+                    "stats_curr": stats_curr,
+                    "stats_all": stats_all,
+                    "stats_none": stats_none
+                })
+        except Exception as e:
+            st.error(f"Error during simulation: {e}")
 
 # ==========================================
 #  MAIN VIEW RENDERER
 # ==========================================
-if not st.session_state.journey_legs:
-    st.info("👈 **Configure your route in the sidebar and click 'Add Leg' to begin your journey.**")
+if not st.session_state.journey_results:
+    st.info("👈 **Configure your multi-leg itinerary in the sidebar and click 'Run Full Itinerary' to begin.**")
 else:
     # --- CUMULATIVE MATH ---
-    cum_time_s = sum(leg["stats_curr"]["journey_time_s"] for leg in st.session_state.journey_legs)
-    cum_stops = sum(len(leg["stops"]) for leg in st.session_state.journey_legs)
+    cum_time_s = sum(res["stats_curr"]["journey_time_s"] for res in st.session_state.journey_results)
+    cum_stops = sum(len(res["stops"]) for res in st.session_state.journey_results)
 
-    # We will separate Diesel and Electric metrics purely for the cumulative report
-    cum_liters_curr, cum_liters_all, cum_liters_none = 0.0, 0.0, 0.0
-    cum_kwh_curr, cum_kwh_all, cum_kwh_none = 0.0, 0.0, 0.0
+    cum_liters_curr, cum_liters_all = 0.0, 0.0
+    cum_kwh_curr, cum_kwh_all = 0.0, 0.0
 
-    for leg in st.session_state.journey_legs:
-        if leg["traction"] == "DIESEL":
-            cum_liters_curr += leg["stats_curr"]["net_kwh"] / 3.5
-            cum_liters_all += leg["stats_all"]["net_kwh"] / 3.5
-            cum_liters_none += leg["stats_none"]["net_kwh"] / 3.5
+    for res in st.session_state.journey_results:
+        if res["traction"] == "DIESEL":
+            conversion_factor = res["diesel_density"] * res["efficiency"]
+            cum_liters_curr += res["stats_curr"]["net_kwh"] / conversion_factor
+            cum_liters_all += res["stats_all"]["net_kwh"] / conversion_factor
         else:
-            cum_kwh_curr += leg["stats_curr"]["net_kwh"]
-            cum_kwh_all += leg["stats_all"]["net_kwh"]
-            cum_kwh_none += leg["stats_none"]["net_kwh"]
+            cum_kwh_curr += res["stats_curr"]["net_kwh"]
+            cum_kwh_all += res["stats_all"]["net_kwh"]
 
     # --- TOP DASHBOARD ---
-    st.subheader(f"🏁 Cumulative Journey Summary ({len(st.session_state.journey_legs)} Legs)")
+    st.subheader(f"🏁 Cumulative Itinerary Summary ({len(st.session_state.journey_results)} Legs)")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Travel Time", format_time(cum_time_s))
     c2.metric("Total Stops Made", cum_stops)
@@ -487,30 +526,40 @@ else:
     st.markdown("---")
 
     # --- INDIVIDUAL LEG BREAKDOWNS ---
-    st.subheader("🗺️ Route Breakdown")
+    st.subheader("🗺️ Itinerary Breakdown")
 
-    for i, leg in enumerate(st.session_state.journey_legs):
-        # Default to expanding only the most recently added leg
-        is_expanded = (i == len(st.session_state.journey_legs) - 1)
+    for res in st.session_state.journey_results:
+        cfg = res["config"]
 
-        with st.expander(
-                f"Leg {i + 1}: {leg['start_name']} ➔ {leg['end_name']} ({leg['traction']} | Mode: {leg['mode'].upper()})",
-                expanded=is_expanded):
+        with st.expander(f"Leg {res['leg_num']}: {cfg['start']} ➔ {cfg['end']} (Mode: {cfg['mode'].upper()})",
+                         expanded=True):
 
-            fig = create_plotly_figure(leg["history"], leg["stops"], TrackProfile("track_profile.xlsx", True).stations,
-                                       leg["traction"] == "ELECTRIC", x_axis_choice)
+            m = int(res["stats_curr"]["journey_time_s"] // 60)
+            s = int(res["stats_curr"]["journey_time_s"] % 60)
+
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Leg Time", f"{m:02d}:{s:02d}")
+            sc2.metric("Leg Stops", len(res["stops"]))
+
+            if res["traction"] == "DIESEL":
+                conversion_factor = res["diesel_density"] * res["efficiency"]
+                l_used = res["stats_curr"]["net_kwh"] / conversion_factor
+                l_saved = (res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]) / conversion_factor
+                sc3.metric("Fuel Used / Saved", f"{l_used:.1f} L / {l_saved:.1f} L")
+            else:
+                k_used = res["stats_curr"]["net_kwh"]
+                k_saved = res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]
+                sc3.metric("Energy Used / Saved", f"{k_used:.1f} kWh / {k_saved:.1f} kWh")
+
+            fig = create_plotly_figure(res["history"], res["stops"], TrackProfile("track_profile.xlsx", True).stations,
+                                       res["traction"] == "ELECTRIC", x_axis_choice)
             st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
-            # Local Leg Energy Report
-            if leg["traction"] == "DIESEL":
-                base_val = leg["stats_all"]["net_kwh"] / 3.5
-                curr_val = leg["stats_curr"]["net_kwh"] / 3.5
-                unit = "Liters"
-            else:
-                base_val = leg["stats_all"]["net_kwh"]
-                curr_val = leg["stats_curr"]["net_kwh"]
-                unit = "kWh"
+            st.caption(f"**Stops Made:** {', '.join(res['stops']) if res['stops'] else 'None'}")
 
-            st.markdown(
-                f"**Leg Energy Metrics:** `{curr_val:.1f}` {unit} used | `{base_val - curr_val:.1f}` {unit} saved by skipping stops.")
-            st.caption(f"**Stops Made:** {', '.join(leg['stops']) if leg['stops'] else 'None'}")
+            route_min = min(cfg["start_km"], cfg["end_km"])
+            route_max = max(cfg["start_km"], cfg["end_km"])
+            all_rq = [s["name"] for s in TrackProfile("track_profile.xlsx", True).stations if
+                      s["type"] == "R" and route_min <= s["km"] <= route_max]
+            skipped = [name for name in all_rq if name not in res["stops"]]
+            st.caption(f"**Stops Skipped:** {', '.join(skipped) if skipped else 'None'}")
