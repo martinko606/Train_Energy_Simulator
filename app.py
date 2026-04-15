@@ -261,7 +261,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
     stops_set = set(stops_names)
     net = [g - r for g, r in zip(history["energy_kwh"], history["regen_kwh"])]
 
-    # Dynamic X-Axis Assignment Based on UI Selection
     if x_axis_mode == "Time (MM:SS)":
         x_data = time_dt_arr
         total_duration = history["time_s"][-1]
@@ -274,7 +273,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         x_data = dist_arr
         route_min, route_max = min(dist_arr), max(dist_arr)
         buffer_km = max(0.5, (route_max - route_min) * 0.03)
-        # Flip X-axis if traveling backwards so it reads left-to-right
         if dist_arr[0] > dist_arr[-1]:
             x_min = dist_arr[0] + buffer_km
             x_max = dist_arr[-1] - buffer_km
@@ -282,9 +280,10 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
             x_min = dist_arr[0] - buffer_km
             x_max = dist_arr[-1] + buffer_km
         x_title = "Distance (km)"
-        x_format = None  # Use default numeric formatting
+        x_format = None
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
+        # INCREASED vertical_spacing to 0.15 to give labels room to breathe
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.15)
 
     fig.add_trace(
         go.Scatter(x=x_data, y=history["v_limit"], name="Speed Limit", line=dict(color="#ff4b4b", dash="dash")), row=1,
@@ -317,7 +316,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         color = "gray" if station["type"] == "X" else ("#0068c9" if station["name"] in stops_set else "#ff4b4b")
 
         try:
-            # Find exact position on X axis
             if x_axis_mode == "Time (MM:SS)":
                 idx = (np.abs(np.array(history["km"]) - skm)).argmin()
                 x_pos = time_dt_arr[idx]
@@ -330,7 +328,7 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
 
             annotations.append(dict(
-                x=x_pos, y=-0.06, xref="x", yref="y domain",
+                x=x_pos, y=-0.08, xref="x", yref="y domain",
                 text=station["name"].title(),
                 showarrow=False, font=dict(size=11, color=color),
                 xanchor="center", yanchor="top"
@@ -339,9 +337,11 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
             pass
 
     fig.update_layout(
-        height=700, margin=dict(l=40, r=40, t=40, b=80), hovermode="x unified",
+        height=750, margin=dict(l=40, r=40, t=40, b=80), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
+        # REMOVED title=x_title from the top graph (xaxis) so it doesn't overlap labels
+        xaxis=dict(showgrid=True, range=[x_min, x_max], tickformat=x_format),
+        # Kept the title on the bottom graph (xaxis2) where it belongs
         xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
         yaxis=dict(title="Speed (km/h)", showgrid=True),
         yaxis2=dict(title="Energy (kWh)", showgrid=True),
