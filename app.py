@@ -13,12 +13,12 @@ import streamlit as st
 # You can add or edit any trains here! They will automatically appear in the UI dropdown.
 PREDEFINED_VEHICLES = {
     "EDITA": {
-        "traction": "DIESEL", "mass": 20000, "length": 15,
-        "power": 115, "aux_power": 10, "accel": 0.5, "decel": 0.8
+        "traction": "DIESEL", "mass": 22000, "length": 15,
+        "power": 152, "aux_power": 20, "accel": 0.5, "decel": 0.8
     },
     "EDITA+Btax": {
-        "traction": "DIESEL", "mass": 35000, "length": 30,
-        "power": 115, "aux_power": 10, "accel": 0.4, "decel": 0.8
+        "traction": "DIESEL", "mass": 42000, "length": 30,
+        "power": 152, "aux_power": 25, "accel": 0.4, "decel": 0.8
     },
 }
 
@@ -118,7 +118,7 @@ class TrainSimulator:
         self.aux_power_w = aux_power_kw * 1000
         self.max_power_w = max_power_kw * 1000
         self.max_accel = max_accel
-        self.max_decel = max_decel
+        self.max_decel = max_decel  # This is 'dec_0' from the formula
         self.train_length_m = length_m
 
     def get_resistance(self, v_m_s: float) -> float:
@@ -162,13 +162,24 @@ class TrainSimulator:
         dt, current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 1.0, 0.0, 0.0, 0.0, 0.0, 0.0
         history = {"time_s": [], "km": [], "v_actual": [], "v_limit": [], "energy_kwh": [], "regen_kwh": []}
 
+        # Gravity constant from the document
+        g_accel = 9.8186
+
         while distance_covered < total_dist_m:
             current_km = start_km + (distance_covered / 1000.0) * direction
             rear_km = current_km - (self.train_length_m / 1000.0) * direction
             current_limit_m_s, slope = track.get_effective_limit_and_grad(current_km, rear_km)
 
-            f_gradient, max_safe_v = self.mass_kg * 9.81 * slope, current_limit_m_s
+            f_gradient = self.mass_kg * g_accel * slope
+            max_safe_v = current_limit_m_s
 
+            # --- Formula (5): dec = dec_0 + g * (grad / 100) ---
+            # (Note: our `slope` variable is already mathematically equivalent to grad/100)
+            effective_decel = self.max_decel + (g_accel * slope)
+            # Clamp effective decel to prevent math errors on unphysically steep downhill drops
+            effective_decel = max(0.05, effective_decel)
+
+            # --- BULLETPROOF RADAR WITH FORMULA (4) ---
             for event in events:
                 tolerance = 0.05 if event["type"] == "stop" else 1e-4
                 is_ahead = (event["km"] <= current_km + tolerance) if direction == -1 else (
@@ -180,23 +191,38 @@ class TrainSimulator:
                 dist_to_event = 0.0 if (event["type"] == "stop" and overshot) else abs(current_km - event["km"]) * 1000
 
                 if event["target_v"] < current_v:
-                    safe_v = math.sqrt(max(0.0, event["target_v"] ** 2 + 2 * self.max_decel * dist_to_event))
+                    # Formula (3) & (4): v1 = sqrt(2 * dbr * dec + v2^2)
+                    safe_v = math.sqrt(max(0.0, event["target_v"] ** 2 + 2 * effective_decel * dist_to_event))
                     max_safe_v = min(max_safe_v, safe_v)
 
             mech_power, regen_power = 0.0, 0.0
 
+            # --- TRAIN PHYSICS ---
             if current_v > max_safe_v + 1e-4:
-                decel = min(self.max_decel, (current_v - max_safe_v) / dt)
-                regen_power = (self.eff_mass * decel) * current_v * self.regen_efficiency
-                current_v = max(0.0, current_v - decel * dt)
+                # BRAKING
+                # Calculate how much total deceleration is required to follow the curve
+                required_decel = (current_v - max_safe_v) / dt
+                actual_decel = min(effective_decel, required_decel)
+
+                # Separate brake deceleration from gravity deceleration for accurate regen calculation
+                # If slope is positive (uphill), gravity is helping, so brakes do less work.
+                brake_decel = actual_decel - (g_accel * slope)
+                brake_decel = max(0.0, min(self.max_decel, brake_decel))
+
+                regen_power = (self.eff_mass * brake_decel) * current_v * self.regen_efficiency
+                current_v = max(0.0, current_v - actual_decel * dt)
+
             elif current_v < min(current_limit_m_s, max_safe_v) - 1e-4:
+                # ACCELERATING
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + (self.eff_mass * self.max_accel) + f_gradient
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
                 current_v = max(0.0, min(current_v + ((actual_force - f_resist - f_gradient) / self.eff_mass) * dt,
                                          current_limit_m_s, max_safe_v))
                 mech_power = max(0.0, actual_force * current_v)
+
             else:
+                # CRUISING
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + f_gradient
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
@@ -215,6 +241,7 @@ class TrainSimulator:
             distance_covered += current_v * dt
             journey_time_s += dt
 
+            # --- DWELL TRIGGER ---
             if current_v < 0.5 and any(abs(current_km - s) <= 0.05 for s in stops_km):
                 current_v = 0.0
                 for _ in range(2):
@@ -248,9 +275,8 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
     stops_set = set(stops_names)
     net = [g - r for g, r in zip(history["energy_kwh"], history["regen_kwh"])]
 
-    # --- Add margin/buffer to X-Axis to prevent clipping at the start and end ---
     total_duration = history["time_s"][-1]
-    buffer_seconds = max(30, int(total_duration * 0.02))  # Add 2% padding, minimum 30 seconds
+    buffer_seconds = max(30, int(total_duration * 0.03))
     t_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
     t_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
 
@@ -282,7 +308,11 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
     for station in all_stations:
         if station["type"] not in ["X", "R"]: continue
         skm = station["km"]
-        color = "#000000" if station["type"] == "X" else ("#79c0ff" if station["name"] in stops_set else "#484f58")
+
+        route_min, route_max = min(history["km"]), max(history["km"])
+        if not (route_min - 0.05 <= skm <= route_max + 0.05): continue
+
+        color = "#e6edf3" if station["type"] == "X" else ("#79c0ff" if station["name"] in stops_set else "#484f58")
         try:
             idx = (np.abs(np.array(history["km"]) - skm)).argmin()
             t_dt = time_dt_arr[idx]
@@ -303,7 +333,9 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
 
     fig.update_layout(
         height=700, margin=dict(l=40, r=40, t=40, b=80), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        paper_bgcolor="#0d1117", plot_bgcolor="#161b22", font=dict(color="#e6edf3", family="Courier New, monospace"),
+        legend=dict(bgcolor="#161b22", bordercolor="#30363d", borderwidth=1, orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
         xaxis=dict(showgrid=True, gridcolor="#30363d", tickformat="%M:%S", range=[t_min, t_max]),
         xaxis2=dict(showgrid=True, gridcolor="#30363d", title="Time (MM:SS)", tickformat="%M:%S", range=[t_min, t_max]),
         yaxis=dict(title="Speed (km/h)", showgrid=True, gridcolor="#30363d"),
@@ -316,7 +348,7 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
 # ==========================================
 #  MAIN DASHBOARD
 # ==========================================
-st.title("Railway Energy Simulator")
+st.title("🚆 Railway Energy Simulator")
 
 mandatory_stations = load_mandatory_stations("track_profile.xlsx")
 if not mandatory_stations:
@@ -400,9 +432,9 @@ if st.sidebar.button("▶ Run Simulation", type="primary", use_container_width=T
 
             st.subheader("Performance Telemetry")
             fig = create_plotly_figure(history, stops, track.stations, traction == "ELECTRIC")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, theme=None)
 
-            st.subheader("Energy Report")
+            st.subheader("📊 Energy Report")
             if traction == "DIESEL":
                 base_val, best_val, curr_val = stats_all["net_kwh"] / 3.5, stats_none["net_kwh"] / 3.5, stats_curr[
                     "net_kwh"] / 3.5
@@ -429,6 +461,6 @@ if st.sidebar.button("▶ Run Simulation", type="primary", use_container_width=T
             st.write(f"**Requested stops skipped:** {', '.join(skipped) if skipped else 'None'}")
 
         except Exception as e:
-            st.error(f"Error reading track_profile.xlsx: {e}")
+            st.error(f"Error during simulation: {e}")
 else:
     st.info("Adjust your parameters in the sidebar and click **Run Simulation** to begin.")
