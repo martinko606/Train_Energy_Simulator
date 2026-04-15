@@ -342,7 +342,7 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         height=750, margin=dict(l=40, r=40, t=40, b=120), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis=dict(showgrid=True, range=[x_min, x_max], tickformat=x_format),
-        xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
+        xaxis2=dict(showgrid=True, title=x_title, title_standoff=40, range=[x_min, x_max], tickformat=x_format),
         yaxis=dict(title="Speed (km/h)", showgrid=True),
         yaxis2=dict(title="Energy (kWh)", showgrid=True),
         shapes=shapes, annotations=annotations
@@ -520,35 +520,48 @@ if st.sidebar.button("▶ Run Full Itinerary", type="primary", use_container_wid
 if not st.session_state.journey_results:
     st.info("👈 **Configure your multi-leg itinerary in the sidebar and click 'Run Full Itinerary' to begin.**")
 else:
-    cum_time_s = sum(res["stats_curr"]["journey_time_s"] for res in st.session_state.journey_results)
-    cum_stops = sum(len(res["stops"]) for res in st.session_state.journey_results)
+    # --- CUMULATIVE MATH ---
+    cum_time_s = 0
+    cum_stops = 0
 
-    cum_liters_curr, cum_liters_all = 0.0, 0.0
-    cum_kwh_curr, cum_kwh_all = 0.0, 0.0
+    cum_base_val = 0.0
+    cum_best_val = 0.0
+    cum_curr_val = 0.0
+
+    # We use the traction type of the first leg for formatting the global units
+    master_traction = st.session_state.journey_results[0]["traction"]
+    master_unit = "Liters" if master_traction == "DIESEL" else "kWh"
 
     for res in st.session_state.journey_results:
-        if res["traction"] == "DIESEL":
-            conversion_factor = res["diesel_density"] * res["efficiency"]
-            cum_liters_curr += res["stats_curr"]["net_kwh"] / conversion_factor
-            cum_liters_all += res["stats_all"]["net_kwh"] / conversion_factor
-        else:
-            cum_kwh_curr += res["stats_curr"]["net_kwh"]
-            cum_kwh_all += res["stats_all"]["net_kwh"]
+        cum_time_s += res["stats_curr"]["journey_time_s"]
+        cum_stops += len(res["stops"])
 
-    st.subheader(f"🏁 Cumulative Itinerary Summary ({len(st.session_state.journey_results)} Legs)")
+        if master_traction == "DIESEL":
+            conversion_factor = res["diesel_density"] * res["efficiency"]
+            cum_base_val += res["stats_all"]["net_kwh"] / conversion_factor
+            cum_best_val += res["stats_none"]["net_kwh"] / conversion_factor
+            cum_curr_val += res["stats_curr"]["net_kwh"] / conversion_factor
+        else:
+            cum_base_val += res["stats_all"]["net_kwh"]
+            cum_best_val += res["stats_none"]["net_kwh"]
+            cum_curr_val += res["stats_curr"]["net_kwh"]
+
+    # --- TOP DASHBOARD ---
+    st.subheader(f"🏁 Itinerary Overview ({len(st.session_state.journey_results)} Legs)")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Travel Time", format_time(cum_time_s))
     c2.metric("Total Stops Made", cum_stops)
 
-    if cum_liters_curr > 0:
-        c3.metric("Total Fuel Consumed", f"{cum_liters_curr:.1f} L")
-        c4.metric("Total Fuel Saved", f"{cum_liters_all - cum_liters_curr:.1f} L", help="Vs. stopping at all requests")
-    elif cum_kwh_curr > 0:
-        c3.metric("Total Net Energy", f"{cum_kwh_curr:.1f} kWh")
-        c4.metric("Total Energy Saved", f"{cum_kwh_all - cum_kwh_curr:.1f} kWh", help="Vs. stopping at all requests")
+    if master_traction == "DIESEL":
+        c3.metric("Total Fuel Consumed", f"{cum_curr_val:.1f} L")
+        c4.metric("Total Fuel Saved", f"{cum_base_val - cum_curr_val:.1f} L", help="Vs. stopping at all requests")
+    else:
+        c3.metric("Total Net Energy", f"{cum_curr_val:.1f} kWh")
+        c4.metric("Total Energy Saved", f"{cum_base_val - cum_curr_val:.1f} kWh", help="Vs. stopping at all requests")
 
     st.markdown("---")
 
+    # --- INDIVIDUAL LEG BREAKDOWNS ---
     st.subheader("🗺️ Itinerary Breakdown")
 
     for res in st.session_state.journey_results:
@@ -556,54 +569,10 @@ else:
 
         with st.expander(f"Leg {res['leg_num']}: {cfg['start']} ➔ {cfg['end']} (Mode: {cfg['mode'].upper()})",
                          expanded=True):
-
-            m = int(res["stats_curr"]["journey_time_s"] // 60)
-            s = int(res["stats_curr"]["journey_time_s"] % 60)
-
-            sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("Leg Time", f"{m:02d}:{s:02d}")
-            sc2.metric("Leg Stops", len(res["stops"]))
-
-            if res["traction"] == "DIESEL":
-                conversion_factor = res["diesel_density"] * res["efficiency"]
-                l_used = res["stats_curr"]["net_kwh"] / conversion_factor
-                l_saved = (res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]) / conversion_factor
-                sc3.metric("Fuel Used / Saved", f"{l_used:.1f} L / {l_saved:.1f} L")
-            else:
-                k_used = res["stats_curr"]["net_kwh"]
-                k_saved = res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]
-                sc3.metric("Energy Used / Saved", f"{k_used:.1f} kWh / {k_saved:.1f} kWh")
-
             # --- PLOT THE GRAPH ---
             fig = create_plotly_figure(res["history"], res["stops"], TrackProfile("track_profile.xlsx", True).stations,
                                        res["traction"] == "ELECTRIC", x_axis_choice)
             st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-
-            st.divider()
-
-            # --- DETAILED ENERGY REPORT (END OF GRAPHS) ---
-            st.markdown(f"#### 📊 Leg {res['leg_num']} Detailed Report")
-            if res["traction"] == "DIESEL":
-                conversion_factor = res["diesel_density"] * res["efficiency"]
-                base_val = res["stats_all"]["net_kwh"] / conversion_factor
-                best_val = res["stats_none"]["net_kwh"] / conversion_factor
-                curr_val = res["stats_curr"]["net_kwh"] / conversion_factor
-                unit = "Liters"
-            else:
-                base_val = res["stats_all"]["net_kwh"]
-                best_val = res["stats_none"]["net_kwh"]
-                curr_val = res["stats_curr"]["net_kwh"]
-                unit = "kWh"
-
-            report_markdown = f"""
-            | Metric | {unit} Consumed | Notes |
-            | :--- | :--- | :--- |
-            | **Baseline (Worst Case)** | `{base_val:.1f}` {unit} | If the train stopped at *every* request stop. |
-            | **Optimal (Best Case)** | `{best_val:.1f}` {unit} | If the train skipped *every* request stop. |
-            | **This Run ({cfg['mode'].upper()})** | `{curr_val:.1f}` {unit} | The actual consumption of this simulation. |
-            | **Total Saved** | **`{base_val - curr_val:.1f}` {unit}** | Savings achieved in this run compared to the baseline. |
-            """
-            st.markdown(report_markdown)
 
             # --- STOP LOGS ---
             st.caption(f"**Stops Made:** {', '.join(res['stops']) if res['stops'] else 'None'}")
@@ -614,3 +583,17 @@ else:
                       s["type"] == "R" and route_min <= s["km"] <= route_max]
             skipped = [name for name in all_rq if name not in res["stops"]]
             st.caption(f"**Stops Skipped:** {', '.join(skipped) if skipped else 'None'}")
+
+    # --- GRAND SUMMARY REPORT (AT THE VERY END) ---
+    st.markdown("---")
+    st.subheader("📊 Cumulative Energy Report (Entire Itinerary)")
+
+    report_markdown = f"""
+    | Metric | Total {master_unit} Consumed | Notes |
+    | :--- | :--- | :--- |
+    | **Baseline (Worst Case)** | `{cum_base_val:.1f}` {master_unit} | If the train stopped at *every* request stop across all legs. |
+    | **Optimal (Best Case)** | `{cum_best_val:.1f}` {master_unit} | If the train skipped *every* request stop across all legs. |
+    | **This Run (Actual)** | `{cum_curr_val:.1f}` {master_unit} | The actual consumption of this entire itinerary. |
+    | **Total Saved** | **`{cum_base_val - cum_curr_val:.1f}` {master_unit}** | Savings achieved across all legs compared to the baseline. |
+    """
+    st.markdown(report_markdown)
