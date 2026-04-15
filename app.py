@@ -328,20 +328,20 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
             shapes.append(dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos, y0=0, y1=e_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
 
+            # Anchor text below the entire graph, angled to prevent overlapping
             annotations.append(dict(
-                x=x_pos, y=0.03, xref="x", yref="y domain",
-                text=f" {station['name'].title()} ",
+                x=x_pos, y=-0.12, xref="x", yref="paper",
+                text=station["name"].title(),
                 showarrow=False, font=dict(size=11, color=color),
-                xanchor="center", yanchor="bottom",
-                bgcolor="rgba(0,0,0,0.4)"
+                xanchor="right", yanchor="top", textangle=-45
             ))
         except ValueError:
             pass
 
     fig.update_layout(
-        height=750, margin=dict(l=40, r=40, t=40, b=40), hovermode="x unified",
+        height=750, margin=dict(l=40, r=40, t=40, b=120), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
+        xaxis=dict(showgrid=True, range=[x_min, x_max], tickformat=x_format),
         xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
         yaxis=dict(title="Speed (km/h)", showgrid=True),
         yaxis2=dict(title="Energy (kWh)", showgrid=True),
@@ -418,7 +418,6 @@ else:
 st.sidebar.header("2. Display Options")
 x_axis_choice = st.sidebar.radio("X-Axis Display", ["Time (MM:SS)", "Distance (km)"])
 
-# --- ITINERARY BUILDER ---
 st.sidebar.header("3. Itinerary Builder")
 builder_mode = st.sidebar.radio("Builder Mode", ["Manual (Leg-by-Leg)", "Auto-Repeat Round Trip"])
 
@@ -432,7 +431,6 @@ if builder_mode == "Manual (Leg-by-Leg)":
             if i == 0:
                 start_station = st.selectbox(f"Start Station", station_names, key=f"start_{i}")
             else:
-                # ENFORCED DEPENDENCY: Lock to previous end station
                 prev_end = itinerary_config[i - 1]["end"]
                 start_station = st.selectbox(f"Start Station (Locked)", station_names,
                                              index=station_names.index(prev_end), disabled=True, key=f"start_{i}")
@@ -450,7 +448,7 @@ if builder_mode == "Manual (Leg-by-Leg)":
                 "mode": mode, "prob": prob, "dwell": dwell
             })
 
-else:  # Auto-Repeat Round Trip Mode
+else:
     st.sidebar.caption("Automatically generates back-and-forth legs.")
     col1, col2 = st.sidebar.columns(2)
     with col1:
@@ -467,7 +465,6 @@ else:  # Auto-Repeat Round Trip Mode
     dwell = st.sidebar.number_input("Global Dwell Time (s)", value=30, step=5)
 
     for i in range(num_legs):
-        # Even legs (0, 2, 4) go A -> B. Odd legs (1, 3, 5) go B -> A.
         if i % 2 == 0:
             cur_start, cur_end = base_start, base_end
         else:
@@ -523,7 +520,6 @@ if st.sidebar.button("▶ Run Full Itinerary", type="primary", use_container_wid
 if not st.session_state.journey_results:
     st.info("👈 **Configure your multi-leg itinerary in the sidebar and click 'Run Full Itinerary' to begin.**")
 else:
-    # --- CUMULATIVE MATH ---
     cum_time_s = sum(res["stats_curr"]["journey_time_s"] for res in st.session_state.journey_results)
     cum_stops = sum(len(res["stops"]) for res in st.session_state.journey_results)
 
@@ -539,7 +535,6 @@ else:
             cum_kwh_curr += res["stats_curr"]["net_kwh"]
             cum_kwh_all += res["stats_all"]["net_kwh"]
 
-    # --- TOP DASHBOARD ---
     st.subheader(f"🏁 Cumulative Itinerary Summary ({len(st.session_state.journey_results)} Legs)")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Travel Time", format_time(cum_time_s))
@@ -554,7 +549,6 @@ else:
 
     st.markdown("---")
 
-    # --- INDIVIDUAL LEG BREAKDOWNS ---
     st.subheader("🗺️ Itinerary Breakdown")
 
     for res in st.session_state.journey_results:
@@ -580,10 +574,38 @@ else:
                 k_saved = res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]
                 sc3.metric("Energy Used / Saved", f"{k_used:.1f} kWh / {k_saved:.1f} kWh")
 
+            # --- PLOT THE GRAPH ---
             fig = create_plotly_figure(res["history"], res["stops"], TrackProfile("track_profile.xlsx", True).stations,
                                        res["traction"] == "ELECTRIC", x_axis_choice)
             st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
+            st.divider()
+
+            # --- DETAILED ENERGY REPORT (END OF GRAPHS) ---
+            st.markdown(f"#### 📊 Leg {res['leg_num']} Detailed Report")
+            if res["traction"] == "DIESEL":
+                conversion_factor = res["diesel_density"] * res["efficiency"]
+                base_val = res["stats_all"]["net_kwh"] / conversion_factor
+                best_val = res["stats_none"]["net_kwh"] / conversion_factor
+                curr_val = res["stats_curr"]["net_kwh"] / conversion_factor
+                unit = "Liters"
+            else:
+                base_val = res["stats_all"]["net_kwh"]
+                best_val = res["stats_none"]["net_kwh"]
+                curr_val = res["stats_curr"]["net_kwh"]
+                unit = "kWh"
+
+            report_markdown = f"""
+            | Metric | {unit} Consumed | Notes |
+            | :--- | :--- | :--- |
+            | **Baseline (Worst Case)** | `{base_val:.1f}` {unit} | If the train stopped at *every* request stop. |
+            | **Optimal (Best Case)** | `{best_val:.1f}` {unit} | If the train skipped *every* request stop. |
+            | **This Run ({cfg['mode'].upper()})** | `{curr_val:.1f}` {unit} | The actual consumption of this simulation. |
+            | **Total Saved** | **`{base_val - curr_val:.1f}` {unit}** | Savings achieved in this run compared to the baseline. |
+            """
+            st.markdown(report_markdown)
+
+            # --- STOP LOGS ---
             st.caption(f"**Stops Made:** {', '.join(res['stops']) if res['stops'] else 'None'}")
 
             route_min = min(cfg["start_km"], cfg["end_km"])
