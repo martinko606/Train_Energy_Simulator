@@ -167,10 +167,7 @@ class TrainSimulator:
 
         dt, current_v, distance_covered, total_energy_j, total_regen_j = 1.0, 0.0, 0.0, 0.0, 0.0
 
-        # Initialize journey time with the global accumulated time from previous legs
         journey_time_s = global_start_time
-
-        # New cumulative distance array added to history
         history = {"time_s": [], "km": [], "cum_dist_km": [], "v_actual": [], "v_limit": [], "energy_kwh": [],
                    "regen_kwh": []}
 
@@ -269,7 +266,7 @@ class TrainSimulator:
 def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis_mode):
     base_time = pd.to_datetime("1970-01-01")
     time_dt_arr = [base_time + pd.to_timedelta(s, unit='s') for s in history["time_s"]]
-    dist_arr = history["cum_dist_km"]  # Using the new strictly increasing cumulative array!
+    dist_arr = history["cum_dist_km"]
     stops_set = set(stops_names)
     net = [g - r for g, r in zip(history["energy_kwh"], history["regen_kwh"])]
 
@@ -280,7 +277,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         x_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
         x_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
 
-        # Switch format automatically if the total cumulative journey exceeds 1 hour
         if total_duration >= 3600:
             x_format = "%H:%M:%S"
             x_title = "Cumulative Time (HH:MM:SS)"
@@ -290,13 +286,11 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
     else:
         x_data = dist_arr
         buffer_km = max(0.5, (dist_arr[-1] - dist_arr[0]) * 0.03)
-        # Because dist_arr is strictly cumulative, it ALWAYS increases Left-to-Right. No flipping required!
         x_min = dist_arr[0] - buffer_km
         x_max = dist_arr[-1] + buffer_km
         x_title = "Cumulative Distance (km)"
         x_format = None
 
-        # Expanded vertical_spacing to give room for top-graph station names and X-axis titles
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.25)
 
     fig.add_trace(
@@ -324,14 +318,12 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         if station["type"] not in ["X", "R"]: continue
         skm = station["km"]
 
-        # Check against the absolute km array to ensure station actually exists on this leg
         route_min, route_max = min(history["km"]), max(history["km"])
         if not (route_min - 0.05 <= skm <= route_max + 0.05): continue
 
         color = "gray" if station["type"] == "X" else ("#0068c9" if station["name"] in stops_set else "#ff4b4b")
 
         try:
-            # Map the absolute KM back to the Cumulative Time or Distance index
             idx = (np.abs(np.array(history["km"]) - skm)).argmin()
 
             if x_axis_mode == "Time (MM:SS)":
@@ -344,7 +336,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
             shapes.append(dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos, y0=0, y1=e_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
 
-            # Annotation for TOP graph (Speed)
             annotations.append(dict(
                 x=x_pos, y=-0.22, xref="x", yref="y domain",
                 text=station["name"].title(),
@@ -352,7 +343,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
                 xanchor="right", yanchor="top", textangle=-45
             ))
 
-            # Annotation for BOTTOM graph (Energy)
             annotations.append(dict(
                 x=x_pos, y=-0.22, xref="x", yref="y2 domain",
                 text=station["name"].title(),
@@ -365,7 +355,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
     fig.update_layout(
         height=850, margin=dict(l=40, r=40, t=40, b=140), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        # Explicitly enabling showticklabels=True to force X-axis to render on BOTH graphs
         xaxis=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format, showticklabels=True),
         xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format, showticklabels=True),
         yaxis=dict(title="Speed (km/h)", showgrid=True),
@@ -456,9 +445,10 @@ if builder_mode == "Manual (Leg-by-Leg)":
             if i == 0:
                 start_station = st.selectbox(f"Start Station", station_names, key=f"start_{i}")
             else:
+                # FORCE UI UPDATE: Give the disabled widget only ONE choice, which is the previous end station
                 prev_end = itinerary_config[i - 1]["end"]
-                start_station = st.selectbox(f"Start Station (Locked)", station_names,
-                                             index=station_names.index(prev_end), disabled=True, key=f"start_{i}")
+                st.selectbox(f"Start Station (Locked)", [prev_end], index=0, disabled=True, key=f"start_{i}")
+                start_station = prev_end
 
             default_end = len(station_names) - 1 if i == 0 else 0
             end_station = st.selectbox(f"End Station", station_names, index=default_end, key=f"end_{i}")
@@ -512,7 +502,6 @@ if st.sidebar.button("▶ Run Full Itinerary", type="primary", use_container_wid
 
     with st.spinner("Calculating Physics for Full Itinerary..."):
         try:
-            # We define global offsets to carry state between legs
             global_time = 0.0
             global_dist = 0.0
 
@@ -527,13 +516,11 @@ if st.sidebar.button("▶ Run Full Itinerary", type="primary", use_container_wid
                     global_start_time=global_time, global_start_dist=global_dist
                 )
 
-                # Baselines strictly used for energy comparison, their internal clock/dist doesn't matter
                 _, _, stats_all = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"], "all", 1.0,
                                                      leg_cfg["dwell"])
                 _, _, stats_none = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"], "none", 0.0,
                                                       leg_cfg["dwell"])
 
-                # Update globals so the next leg seamlessly begins where this one finished
                 global_time = history["time_s"][-1]
                 global_dist = history["cum_dist_km"][-1]
 
@@ -558,8 +545,6 @@ if st.sidebar.button("▶ Run Full Itinerary", type="primary", use_container_wid
 if not st.session_state.journey_results:
     st.info("👈 **Configure your multi-leg itinerary in the sidebar and click 'Run Full Itinerary' to begin.**")
 else:
-    # --- CUMULATIVE MATH ---
-    # Since time is tracked cumulatively inside the engine, total time is simply the last timestamp of the final leg
     cum_time_s = st.session_state.journey_results[-1]["history"]["time_s"][-1]
     cum_stops = sum(len(res["stops"]) for res in st.session_state.journey_results)
 
@@ -581,7 +566,6 @@ else:
             cum_best_val += res["stats_none"]["net_kwh"]
             cum_curr_val += res["stats_curr"]["net_kwh"]
 
-    # --- TOP DASHBOARD ---
     st.subheader(f"🏁 Cumulative Itinerary Summary ({len(st.session_state.journey_results)} Legs)")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Travel Time", format_time(cum_time_s))
@@ -596,7 +580,6 @@ else:
 
     st.markdown("---")
 
-    # --- INDIVIDUAL LEG BREAKDOWNS ---
     st.subheader("🗺️ Itinerary Breakdown")
 
     for res in st.session_state.journey_results:
@@ -605,7 +588,6 @@ else:
         with st.expander(f"Leg {res['leg_num']}: {cfg['start']} ➔ {cfg['end']} (Mode: {cfg['mode'].upper()})",
                          expanded=True):
 
-            # Use raw un-offset time for the sub-header to show "Time spent exclusively on this leg"
             m = int(res["stats_curr"]["journey_time_s"] // 60)
             s = int(res["stats_curr"]["journey_time_s"] % 60)
 
@@ -623,12 +605,10 @@ else:
                 k_saved = res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]
                 sc3.metric("Energy Used / Saved", f"{k_used:.1f} kWh / {k_saved:.1f} kWh")
 
-            # --- PLOT THE GRAPH ---
             fig = create_plotly_figure(res["history"], res["stops"], TrackProfile("track_profile.xlsx", True).stations,
                                        res["traction"] == "ELECTRIC", x_axis_choice)
             st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
-            # --- STOP LOGS ---
             st.caption(f"**Stops Made:** {', '.join(res['stops']) if res['stops'] else 'None'}")
 
             route_min = min(cfg["start_km"], cfg["end_km"])
@@ -638,7 +618,6 @@ else:
             skipped = [name for name in all_rq if name not in res["stops"]]
             st.caption(f"**Stops Skipped:** {', '.join(skipped) if skipped else 'None'}")
 
-    # --- GRAND SUMMARY REPORT (AT THE VERY END) ---
     st.markdown("---")
     st.subheader("📊 Cumulative Energy Report (Entire Itinerary)")
 
