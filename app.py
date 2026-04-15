@@ -159,13 +159,20 @@ class TrainSimulator:
 
         return events, stops_km, stops_names
 
-    def run_simulation(self, track, start_km, end_km, stop_mode, stop_prob, dwell_time):
+    def run_simulation(self, track, start_km, end_km, stop_mode, stop_prob, dwell_time, global_start_time=0.0,
+                       global_start_dist=0.0):
         total_dist_m = abs(start_km - end_km) * 1000
         direction = -1 if start_km > end_km else 1
         events, stops_km, stops_names = self._build_events(track, start_km, end_km, stop_mode, stop_prob, direction)
 
-        dt, current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 1.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        history = {"time_s": [], "km": [], "v_actual": [], "v_limit": [], "energy_kwh": [], "regen_kwh": []}
+        dt, current_v, distance_covered, total_energy_j, total_regen_j = 1.0, 0.0, 0.0, 0.0, 0.0
+
+        # Initialize journey time with the global accumulated time from previous legs
+        journey_time_s = global_start_time
+
+        # New cumulative distance array added to history
+        history = {"time_s": [], "km": [], "cum_dist_km": [], "v_actual": [], "v_limit": [], "energy_kwh": [],
+                   "regen_kwh": []}
 
         g_accel = 9.8186
 
@@ -220,6 +227,7 @@ class TrainSimulator:
 
             history["time_s"].append(journey_time_s)
             history["km"].append(current_km)
+            history["cum_dist_km"].append(global_start_dist + (distance_covered / 1000.0))
             history["v_actual"].append(current_v * 3.6)
             history["v_limit"].append(current_limit_m_s * 3.6)
             history["energy_kwh"].append(total_energy_j / 3_600_000.0)
@@ -235,6 +243,7 @@ class TrainSimulator:
                 for _ in range(2):
                     history["time_s"].append(journey_time_s)
                     history["km"].append(current_km)
+                    history["cum_dist_km"].append(global_start_dist + (distance_covered / 1000.0))
                     history["v_actual"].append(0.0)
                     history["v_limit"].append(current_limit_m_s * 3.6)
                     history["energy_kwh"].append(total_energy_j / 3_600_000.0)
@@ -260,7 +269,7 @@ class TrainSimulator:
 def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis_mode):
     base_time = pd.to_datetime("1970-01-01")
     time_dt_arr = [base_time + pd.to_timedelta(s, unit='s') for s in history["time_s"]]
-    dist_arr = history["km"]
+    dist_arr = history["cum_dist_km"]  # Using the new strictly increasing cumulative array!
     stops_set = set(stops_names)
     net = [g - r for g, r in zip(history["energy_kwh"], history["regen_kwh"])]
 
@@ -270,22 +279,25 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         buffer_seconds = max(30, int(total_duration * 0.03))
         x_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
         x_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
-        x_title = "Time (MM:SS)"
-        x_format = "%M:%S"
+
+        # Switch format automatically if the total cumulative journey exceeds 1 hour
+        if total_duration >= 3600:
+            x_format = "%H:%M:%S"
+            x_title = "Cumulative Time (HH:MM:SS)"
+        else:
+            x_format = "%M:%S"
+            x_title = "Cumulative Time (MM:SS)"
     else:
         x_data = dist_arr
-        route_min, route_max = min(dist_arr), max(dist_arr)
-        buffer_km = max(0.5, (route_max - route_min) * 0.03)
-        if dist_arr[0] > dist_arr[-1]:
-            x_min = dist_arr[0] + buffer_km
-            x_max = dist_arr[-1] - buffer_km
-        else:
-            x_min = dist_arr[0] - buffer_km
-            x_max = dist_arr[-1] + buffer_km
-        x_title = "Distance (km)"
+        buffer_km = max(0.5, (dist_arr[-1] - dist_arr[0]) * 0.03)
+        # Because dist_arr is strictly cumulative, it ALWAYS increases Left-to-Right. No flipping required!
+        x_min = dist_arr[0] - buffer_km
+        x_max = dist_arr[-1] + buffer_km
+        x_title = "Cumulative Distance (km)"
         x_format = None
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
+        # Expanded vertical_spacing to give room for top-graph station names and X-axis titles
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.25)
 
     fig.add_trace(
         go.Scatter(x=x_data, y=history["v_limit"], name="Speed Limit", line=dict(color="#ff4b4b", dash="dash")), row=1,
@@ -311,26 +323,38 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
     for station in all_stations:
         if station["type"] not in ["X", "R"]: continue
         skm = station["km"]
+
+        # Check against the absolute km array to ensure station actually exists on this leg
         route_min, route_max = min(history["km"]), max(history["km"])
         if not (route_min - 0.05 <= skm <= route_max + 0.05): continue
 
         color = "gray" if station["type"] == "X" else ("#0068c9" if station["name"] in stops_set else "#ff4b4b")
 
         try:
+            # Map the absolute KM back to the Cumulative Time or Distance index
+            idx = (np.abs(np.array(history["km"]) - skm)).argmin()
+
             if x_axis_mode == "Time (MM:SS)":
-                idx = (np.abs(np.array(history["km"]) - skm)).argmin()
                 x_pos = time_dt_arr[idx]
             else:
-                x_pos = skm
+                x_pos = dist_arr[idx]
 
             shapes.append(dict(type="line", xref="x", yref="y", x0=x_pos, x1=x_pos, y0=0, y1=v_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
             shapes.append(dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos, y0=0, y1=e_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
 
-            # Anchor text below the entire graph, angled to prevent overlapping
+            # Annotation for TOP graph (Speed)
             annotations.append(dict(
-                x=x_pos, y=-0.12, xref="x", yref="paper",
+                x=x_pos, y=-0.22, xref="x", yref="y domain",
+                text=station["name"].title(),
+                showarrow=False, font=dict(size=11, color=color),
+                xanchor="right", yanchor="top", textangle=-45
+            ))
+
+            # Annotation for BOTTOM graph (Energy)
+            annotations.append(dict(
+                x=x_pos, y=-0.22, xref="x", yref="y2 domain",
                 text=station["name"].title(),
                 showarrow=False, font=dict(size=11, color=color),
                 xanchor="right", yanchor="top", textangle=-45
@@ -339,10 +363,11 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
             pass
 
     fig.update_layout(
-        height=750, margin=dict(l=40, r=40, t=40, b=120), hovermode="x unified",
+        height=850, margin=dict(l=40, r=40, t=40, b=140), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(showgrid=True, range=[x_min, x_max], tickformat=x_format),
-        xaxis2=dict(showgrid=True, title=x_title, title_standoff=40, range=[x_min, x_max], tickformat=x_format),
+        # Explicitly enabling showticklabels=True to force X-axis to render on BOTH graphs
+        xaxis=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format, showticklabels=True),
+        xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format, showticklabels=True),
         yaxis=dict(title="Speed (km/h)", showgrid=True),
         yaxis2=dict(title="Energy (kWh)", showgrid=True),
         shapes=shapes, annotations=annotations
@@ -355,7 +380,7 @@ def format_time(seconds: float) -> str:
     s = int(seconds % 60)
     h = int(m // 60)
     if h > 0:
-        return f"{h}:{m % 60:02d}:{s:02d}"
+        return f"{h:02d}:{m % 60:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
 
@@ -487,17 +512,30 @@ if st.sidebar.button("▶ Run Full Itinerary", type="primary", use_container_wid
 
     with st.spinner("Calculating Physics for Full Itinerary..."):
         try:
+            # We define global offsets to carry state between legs
+            global_time = 0.0
+            global_dist = 0.0
+
             for idx, leg_cfg in enumerate(itinerary_config):
                 is_fwd = leg_cfg["start_km"] > leg_cfg["end_km"]
                 track = TrackProfile("track_profile.xlsx", is_forward_direction=is_fwd)
                 sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
-                history, stops, stats_curr = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"],
-                                                                leg_cfg["mode"], leg_cfg["prob"], leg_cfg["dwell"])
+                history, stops, stats_curr = sim.run_simulation(
+                    track, leg_cfg["start_km"], leg_cfg["end_km"],
+                    leg_cfg["mode"], leg_cfg["prob"], leg_cfg["dwell"],
+                    global_start_time=global_time, global_start_dist=global_dist
+                )
+
+                # Baselines strictly used for energy comparison, their internal clock/dist doesn't matter
                 _, _, stats_all = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"], "all", 1.0,
                                                      leg_cfg["dwell"])
                 _, _, stats_none = sim.run_simulation(track, leg_cfg["start_km"], leg_cfg["end_km"], "none", 0.0,
                                                       leg_cfg["dwell"])
+
+                # Update globals so the next leg seamlessly begins where this one finished
+                global_time = history["time_s"][-1]
+                global_dist = history["cum_dist_km"][-1]
 
                 st.session_state.journey_results.append({
                     "leg_num": idx + 1,
@@ -521,21 +559,18 @@ if not st.session_state.journey_results:
     st.info("👈 **Configure your multi-leg itinerary in the sidebar and click 'Run Full Itinerary' to begin.**")
 else:
     # --- CUMULATIVE MATH ---
-    cum_time_s = 0
-    cum_stops = 0
+    # Since time is tracked cumulatively inside the engine, total time is simply the last timestamp of the final leg
+    cum_time_s = st.session_state.journey_results[-1]["history"]["time_s"][-1]
+    cum_stops = sum(len(res["stops"]) for res in st.session_state.journey_results)
 
     cum_base_val = 0.0
     cum_best_val = 0.0
     cum_curr_val = 0.0
 
-    # We use the traction type of the first leg for formatting the global units
     master_traction = st.session_state.journey_results[0]["traction"]
     master_unit = "Liters" if master_traction == "DIESEL" else "kWh"
 
     for res in st.session_state.journey_results:
-        cum_time_s += res["stats_curr"]["journey_time_s"]
-        cum_stops += len(res["stops"])
-
         if master_traction == "DIESEL":
             conversion_factor = res["diesel_density"] * res["efficiency"]
             cum_base_val += res["stats_all"]["net_kwh"] / conversion_factor
@@ -547,7 +582,7 @@ else:
             cum_curr_val += res["stats_curr"]["net_kwh"]
 
     # --- TOP DASHBOARD ---
-    st.subheader(f"🏁 Itinerary Overview ({len(st.session_state.journey_results)} Legs)")
+    st.subheader(f"🏁 Cumulative Itinerary Summary ({len(st.session_state.journey_results)} Legs)")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Travel Time", format_time(cum_time_s))
     c2.metric("Total Stops Made", cum_stops)
@@ -569,6 +604,25 @@ else:
 
         with st.expander(f"Leg {res['leg_num']}: {cfg['start']} ➔ {cfg['end']} (Mode: {cfg['mode'].upper()})",
                          expanded=True):
+
+            # Use raw un-offset time for the sub-header to show "Time spent exclusively on this leg"
+            m = int(res["stats_curr"]["journey_time_s"] // 60)
+            s = int(res["stats_curr"]["journey_time_s"] % 60)
+
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Leg Specific Time", f"{m:02d}:{s:02d}")
+            sc2.metric("Leg Stops", len(res["stops"]))
+
+            if res["traction"] == "DIESEL":
+                conversion_factor = res["diesel_density"] * res["efficiency"]
+                l_used = res["stats_curr"]["net_kwh"] / conversion_factor
+                l_saved = (res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]) / conversion_factor
+                sc3.metric("Fuel Used / Saved", f"{l_used:.1f} L / {l_saved:.1f} L")
+            else:
+                k_used = res["stats_curr"]["net_kwh"]
+                k_saved = res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]
+                sc3.metric("Energy Used / Saved", f"{k_used:.1f} kWh / {k_saved:.1f} kWh")
+
             # --- PLOT THE GRAPH ---
             fig = create_plotly_figure(res["history"], res["stops"], TrackProfile("track_profile.xlsx", True).stations,
                                        res["traction"] == "ELECTRIC", x_axis_choice)
