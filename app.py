@@ -118,7 +118,7 @@ class TrainSimulator:
         self.aux_power_w = aux_power_kw * 1000
         self.max_power_w = max_power_kw * 1000
         self.max_accel = max_accel
-        self.max_decel = max_decel  # This is 'dec_0' from the formula
+        self.max_decel = max_decel
         self.train_length_m = length_m
 
     def get_resistance(self, v_m_s: float) -> float:
@@ -162,7 +162,6 @@ class TrainSimulator:
         dt, current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 1.0, 0.0, 0.0, 0.0, 0.0, 0.0
         history = {"time_s": [], "km": [], "v_actual": [], "v_limit": [], "energy_kwh": [], "regen_kwh": []}
 
-        # Gravity constant from the document
         g_accel = 9.8186
 
         while distance_covered < total_dist_m:
@@ -171,15 +170,9 @@ class TrainSimulator:
             current_limit_m_s, slope = track.get_effective_limit_and_grad(current_km, rear_km)
 
             f_gradient = self.mass_kg * g_accel * slope
+            effective_decel = max(0.05, self.max_decel + (g_accel * slope))
             max_safe_v = current_limit_m_s
 
-            # --- Formula (5): dec = dec_0 + g * (grad / 100) ---
-            # (Note: our `slope` variable is already mathematically equivalent to grad/100)
-            effective_decel = self.max_decel + (g_accel * slope)
-            # Clamp effective decel to prevent math errors on unphysically steep downhill drops
-            effective_decel = max(0.05, effective_decel)
-
-            # --- BULLETPROOF RADAR WITH FORMULA (4) ---
             for event in events:
                 tolerance = 0.05 if event["type"] == "stop" else 1e-4
                 is_ahead = (event["km"] <= current_km + tolerance) if direction == -1 else (
@@ -191,38 +184,31 @@ class TrainSimulator:
                 dist_to_event = 0.0 if (event["type"] == "stop" and overshot) else abs(current_km - event["km"]) * 1000
 
                 if event["target_v"] < current_v:
-                    # Formula (3) & (4): v1 = sqrt(2 * dbr * dec + v2^2)
                     safe_v = math.sqrt(max(0.0, event["target_v"] ** 2 + 2 * effective_decel * dist_to_event))
                     max_safe_v = min(max_safe_v, safe_v)
 
             mech_power, regen_power = 0.0, 0.0
 
-            # --- TRAIN PHYSICS ---
             if current_v > max_safe_v + 1e-4:
-                # BRAKING
-                # Calculate how much total deceleration is required to follow the curve
+                f_resist = self.get_resistance(current_v)
+                natural_decel = (f_resist + f_gradient) / self.eff_mass
                 required_decel = (current_v - max_safe_v) / dt
-                actual_decel = min(effective_decel, required_decel)
 
-                # Separate brake deceleration from gravity deceleration for accurate regen calculation
-                # If slope is positive (uphill), gravity is helping, so brakes do less work.
-                brake_decel = actual_decel - (g_accel * slope)
-                brake_decel = max(0.0, min(self.max_decel, brake_decel))
+                brake_application = min(self.max_decel, required_decel - natural_decel)
+                brake_application = max(0.0, brake_application)
+                actual_decel = brake_application + natural_decel
 
-                regen_power = (self.eff_mass * brake_decel) * current_v * self.regen_efficiency
+                regen_power = (self.eff_mass * brake_application) * current_v * self.regen_efficiency
                 current_v = max(0.0, current_v - actual_decel * dt)
 
             elif current_v < min(current_limit_m_s, max_safe_v) - 1e-4:
-                # ACCELERATING
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + (self.eff_mass * self.max_accel) + f_gradient
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
                 current_v = max(0.0, min(current_v + ((actual_force - f_resist - f_gradient) / self.eff_mass) * dt,
                                          current_limit_m_s, max_safe_v))
                 mech_power = max(0.0, actual_force * current_v)
-
             else:
-                # CRUISING
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + f_gradient
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
@@ -241,7 +227,6 @@ class TrainSimulator:
             distance_covered += current_v * dt
             journey_time_s += dt
 
-            # --- DWELL TRIGGER ---
             if current_v < 0.5 and any(abs(current_km - s) <= 0.05 for s in stops_km):
                 current_v = 0.0
                 for _ in range(2):
@@ -269,37 +254,54 @@ class TrainSimulator:
 # ==========================================
 #  UI & PLOTTING HELPERS
 # ==========================================
-def create_plotly_figure(history, stops_names, all_stations, is_electric):
+def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis_mode):
     base_time = pd.to_datetime("1970-01-01")
     time_dt_arr = [base_time + pd.to_timedelta(s, unit='s') for s in history["time_s"]]
+    dist_arr = history["km"]
     stops_set = set(stops_names)
     net = [g - r for g, r in zip(history["energy_kwh"], history["regen_kwh"])]
 
-    total_duration = history["time_s"][-1]
-    buffer_seconds = max(30, int(total_duration * 0.03))
-    t_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
-    t_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
+    # Dynamic X-Axis Assignment Based on UI Selection
+    if x_axis_mode == "Time (MM:SS)":
+        x_data = time_dt_arr
+        total_duration = history["time_s"][-1]
+        buffer_seconds = max(30, int(total_duration * 0.03))
+        x_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
+        x_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
+        x_title = "Time (MM:SS)"
+        x_format = "%M:%S"
+    else:
+        x_data = dist_arr
+        route_min, route_max = min(dist_arr), max(dist_arr)
+        buffer_km = max(0.5, (route_max - route_min) * 0.03)
+        # Flip X-axis if traveling backwards so it reads left-to-right
+        if dist_arr[0] > dist_arr[-1]:
+            x_min = dist_arr[0] + buffer_km
+            x_max = dist_arr[-1] - buffer_km
+        else:
+            x_min = dist_arr[0] - buffer_km
+            x_max = dist_arr[-1] + buffer_km
+        x_title = "Distance (km)"
+        x_format = None  # Use default numeric formatting
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
 
     fig.add_trace(
-        go.Scatter(x=time_dt_arr, y=history["v_limit"], name="Speed Limit", line=dict(color="#f85149", dash="dash")),
-        row=1, col=1)
-    fig.add_trace(
-        go.Scatter(x=time_dt_arr, y=history["v_actual"], name="Actual Speed", line=dict(color="#3fb950", width=2),
-                   fill="tozeroy", fillcolor="rgba(63,185,80,0.1)"), row=1, col=1)
+        go.Scatter(x=x_data, y=history["v_limit"], name="Speed Limit", line=dict(color="#ff4b4b", dash="dash")), row=1,
+        col=1)
+    fig.add_trace(go.Scatter(x=x_data, y=history["v_actual"], name="Actual Speed", line=dict(color="#0068c9", width=2),
+                             fill="tozeroy", fillcolor="rgba(0, 104, 201, 0.1)"), row=1, col=1)
 
     fig.add_trace(
-        go.Scatter(x=time_dt_arr, y=history["energy_kwh"], name="Gross Energy", line=dict(color="#d29922", width=2),
-                   fill="tozeroy", fillcolor="rgba(210,153,34,0.1)"), row=2, col=1)
-    fig.add_trace(
-        go.Scatter(x=time_dt_arr, y=net, name="Net Energy", line=dict(color="#bc8cff", width=2, dash="dashdot")), row=2,
-        col=1)
+        go.Scatter(x=x_data, y=history["energy_kwh"], name="Gross Energy", line=dict(color="#f9a03f", width=2),
+                   fill="tozeroy", fillcolor="rgba(249, 160, 63, 0.1)"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_data, y=net, name="Net Energy", line=dict(color="#83c9ff", width=2, dash="dashdot")),
+                  row=2, col=1)
 
     if is_electric:
-        fig.add_trace(go.Scatter(x=time_dt_arr, y=history["regen_kwh"], name="Regen Recovered",
-                                 line=dict(color="#58a6ff", width=1.5, dash="dot"), fill="tozeroy",
-                                 fillcolor="rgba(88,166,255,0.1)"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=x_data, y=history["regen_kwh"], name="Regen Recovered",
+                                 line=dict(color="#29b5e8", width=1.5, dash="dot"), fill="tozeroy",
+                                 fillcolor="rgba(41, 181, 232, 0.1)"), row=2, col=1)
 
     shapes, annotations = [], []
     v_max = max(max(history["v_limit"]), max(history["v_actual"])) * 1.05
@@ -312,18 +314,23 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
         route_min, route_max = min(history["km"]), max(history["km"])
         if not (route_min - 0.05 <= skm <= route_max + 0.05): continue
 
-        color = "#e6edf3" if station["type"] == "X" else ("#79c0ff" if station["name"] in stops_set else "#484f58")
-        try:
-            idx = (np.abs(np.array(history["km"]) - skm)).argmin()
-            t_dt = time_dt_arr[idx]
+        color = "gray" if station["type"] == "X" else ("#0068c9" if station["name"] in stops_set else "#ff4b4b")
 
-            shapes.append(dict(type="line", xref="x", yref="y", x0=t_dt, x1=t_dt, y0=0, y1=v_max,
+        try:
+            # Find exact position on X axis
+            if x_axis_mode == "Time (MM:SS)":
+                idx = (np.abs(np.array(history["km"]) - skm)).argmin()
+                x_pos = time_dt_arr[idx]
+            else:
+                x_pos = skm
+
+            shapes.append(dict(type="line", xref="x", yref="y", x0=x_pos, x1=x_pos, y0=0, y1=v_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
-            shapes.append(dict(type="line", xref="x", yref="y2", x0=t_dt, x1=t_dt, y0=0, y1=e_max,
+            shapes.append(dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos, y0=0, y1=e_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
 
             annotations.append(dict(
-                x=t_dt, y=-0.06, xref="x", yref="y domain",
+                x=x_pos, y=-0.06, xref="x", yref="y domain",
                 text=station["name"].title(),
                 showarrow=False, font=dict(size=11, color=color),
                 xanchor="center", yanchor="top"
@@ -333,13 +340,11 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric):
 
     fig.update_layout(
         height=700, margin=dict(l=40, r=40, t=40, b=80), hovermode="x unified",
-        paper_bgcolor="#0d1117", plot_bgcolor="#161b22", font=dict(color="#e6edf3", family="Courier New, monospace"),
-        legend=dict(bgcolor="#161b22", bordercolor="#30363d", borderwidth=1, orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1),
-        xaxis=dict(showgrid=True, gridcolor="#30363d", tickformat="%M:%S", range=[t_min, t_max]),
-        xaxis2=dict(showgrid=True, gridcolor="#30363d", title="Time (MM:SS)", tickformat="%M:%S", range=[t_min, t_max]),
-        yaxis=dict(title="Speed (km/h)", showgrid=True, gridcolor="#30363d"),
-        yaxis2=dict(title="Energy (kWh)", showgrid=True, gridcolor="#30363d"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
+        xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format),
+        yaxis=dict(title="Speed (km/h)", showgrid=True),
+        yaxis2=dict(title="Energy (kWh)", showgrid=True),
         shapes=shapes, annotations=annotations
     )
     return fig
@@ -397,6 +402,9 @@ mode = st.sidebar.selectbox("Request Stop Mode", ["random", "all", "none"], inde
 prob = st.sidebar.slider("Request Probability", 0.0, 1.0, 0.6, 0.05, disabled=(mode != "random"))
 dwell = st.sidebar.number_input("Dwell Time (s)", value=30, step=5)
 
+st.sidebar.header("4. Display Options")
+x_axis_choice = st.sidebar.radio("X-Axis Display", ["Time (MM:SS)", "Distance (km)"])
+
 if st.sidebar.button("▶ Run Simulation", type="primary", use_container_width=True):
     if start_km == end_km:
         st.warning("Start and End stations cannot be the same!")
@@ -431,8 +439,9 @@ if st.sidebar.button("▶ Run Simulation", type="primary", use_container_width=T
                             help="Compared to stopping at every request stop.")
 
             st.subheader("Performance Telemetry")
-            fig = create_plotly_figure(history, stops, track.stations, traction == "ELECTRIC")
-            st.plotly_chart(fig, use_container_width=True, theme=None)
+            fig = create_plotly_figure(history, stops, track.stations, traction == "ELECTRIC", x_axis_choice)
+
+            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
             st.subheader("📊 Energy Report")
             if traction == "DIESEL":
