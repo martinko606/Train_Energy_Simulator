@@ -118,7 +118,6 @@ class TrainSimulator:
         self.mass_kg = mass_kg
         self.eff_mass = self.mass_kg * 1.08
         self.A, self.B, self.C = 1500, 30, 4
-        # We use the specific efficiency parameter here for general power transmission
         self.traction_efficiency = efficiency if traction_type == "ELECTRIC" else 0.85
         self.regen_efficiency = 0.75 if traction_type == "ELECTRIC" else 0.0
         self.aux_power_w = aux_power_kw * 1000
@@ -387,13 +386,12 @@ if vehicle_choice == "Custom":
     accel = st.sidebar.slider("Max Acceleration (m/s²)", 0.2, 1.2, 0.6, 0.1)
     decel = st.sidebar.slider("Max Braking (m/s²)", 0.4, 1.5, 0.8, 0.1)
 
-    # Custom Efficiency
     if traction == "DIESEL":
         efficiency = st.sidebar.slider("Thermal Efficiency (%)", 15, 60, 35) / 100.0
         diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0, step=0.1)
     else:
         efficiency = st.sidebar.slider("Grid-to-Wheel Efficiency (%)", 50, 95, 85) / 100.0
-        diesel_density = 10.0  # Unused for electric
+        diesel_density = 10.0
 else:
     preset = PREDEFINED_VEHICLES[vehicle_choice]
     traction = preset["traction"]
@@ -420,34 +418,65 @@ else:
 st.sidebar.header("2. Display Options")
 x_axis_choice = st.sidebar.radio("X-Axis Display", ["Time (MM:SS)", "Distance (km)"])
 
+# --- ITINERARY BUILDER ---
 st.sidebar.header("3. Itinerary Builder")
-num_legs = st.sidebar.number_input("Number of Legs", min_value=1, max_value=15, value=1)
+builder_mode = st.sidebar.radio("Builder Mode", ["Manual (Leg-by-Leg)", "Auto-Repeat Round Trip"])
 
 itinerary_config = []
-for i in range(num_legs):
-    with st.sidebar.expander(f"Leg {i + 1} Configuration", expanded=(i == 0)):
-        if i == 0:
-            start_station = st.selectbox(f"Start Station", station_names, key=f"start_{i}")
+
+if builder_mode == "Manual (Leg-by-Leg)":
+    num_legs = st.sidebar.number_input("Number of Custom Legs", min_value=1, max_value=15, value=1)
+
+    for i in range(num_legs):
+        with st.sidebar.expander(f"Leg {i + 1} Configuration", expanded=(i == 0)):
+            if i == 0:
+                start_station = st.selectbox(f"Start Station", station_names, key=f"start_{i}")
+            else:
+                # ENFORCED DEPENDENCY: Lock to previous end station
+                prev_end = itinerary_config[i - 1]["end"]
+                start_station = st.selectbox(f"Start Station (Locked)", station_names,
+                                             index=station_names.index(prev_end), disabled=True, key=f"start_{i}")
+
+            default_end = len(station_names) - 1 if i == 0 else 0
+            end_station = st.selectbox(f"End Station", station_names, index=default_end, key=f"end_{i}")
+
+            mode = st.selectbox(f"Request Stop Mode", ["random", "all", "none"], key=f"mode_{i}")
+            prob = st.slider(f"Probability", 0.0, 1.0, 0.6, 0.05, disabled=(mode != "random"), key=f"prob_{i}")
+            dwell = st.number_input(f"Dwell Time (s)", value=30, step=5, key=f"dwell_{i}")
+
+            itinerary_config.append({
+                "start": start_station, "start_km": station_dict[start_station],
+                "end": end_station, "end_km": station_dict[end_station],
+                "mode": mode, "prob": prob, "dwell": dwell
+            })
+
+else:  # Auto-Repeat Round Trip Mode
+    st.sidebar.caption("Automatically generates back-and-forth legs.")
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        base_start = st.selectbox("Terminal A", station_names, index=0)
+    with col2:
+        base_end = st.selectbox("Terminal B", station_names, index=len(station_names) - 1)
+
+    num_legs = st.sidebar.number_input("Total Number of Legs", min_value=1, max_value=20, value=2,
+                                       help="e.g., 2 legs = 1 full round trip")
+
+    st.sidebar.markdown("---")
+    mode = st.sidebar.selectbox("Global Stop Mode", ["random", "all", "none"])
+    prob = st.sidebar.slider("Global Probability", 0.0, 1.0, 0.6, 0.05, disabled=(mode != "random"))
+    dwell = st.sidebar.number_input("Global Dwell Time (s)", value=30, step=5)
+
+    for i in range(num_legs):
+        # Even legs (0, 2, 4) go A -> B. Odd legs (1, 3, 5) go B -> A.
+        if i % 2 == 0:
+            cur_start, cur_end = base_start, base_end
         else:
-            prev_end = itinerary_config[i - 1]["end"]
-            start_station = st.selectbox(f"Start Station (Auto-linked)", station_names,
-                                         index=station_names.index(prev_end), key=f"start_{i}")
-
-        default_end = len(station_names) - 1 if i == 0 else 0
-        end_station = st.selectbox(f"End Station", station_names, index=default_end, key=f"end_{i}")
-
-        mode = st.selectbox(f"Request Stop Mode", ["random", "all", "none"], key=f"mode_{i}")
-        prob = st.slider(f"Probability", 0.0, 1.0, 0.6, 0.05, disabled=(mode != "random"), key=f"prob_{i}")
-        dwell = st.number_input(f"Dwell Time (s)", value=30, step=5, key=f"dwell_{i}")
+            cur_start, cur_end = base_end, base_start
 
         itinerary_config.append({
-            "start": start_station,
-            "start_km": station_dict[start_station],
-            "end": end_station,
-            "end_km": station_dict[end_station],
-            "mode": mode,
-            "prob": prob,
-            "dwell": dwell
+            "start": cur_start, "start_km": station_dict[cur_start],
+            "end": cur_end, "end_km": station_dict[cur_end],
+            "mode": mode, "prob": prob, "dwell": dwell
         })
 
 # --- RUN BUTTON ---
