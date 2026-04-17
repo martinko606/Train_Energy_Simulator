@@ -176,11 +176,16 @@ class TrainSimulator:
         while distance_covered < total_dist_m:
             current_km = start_km + (distance_covered / 1000.0) * direction
             rear_km = current_km - (self.train_length_m / 1000.0) * direction
-            current_limit_m_s, slope = track.get_effective_limit_and_grad(current_km, rear_km)
+
+            # Physics limit accounts for the entire length of the train
+            effective_limit_m_s, slope = track.get_effective_limit_and_grad(current_km, rear_km)
+
+            # Visual limit is plotted strictly at the front of the train
+            track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
 
             f_gradient = self.mass_kg * g_accel * slope
             effective_decel = max(0.05, self.max_decel + (g_accel * slope))
-            max_safe_v = current_limit_m_s
+            max_safe_v = effective_limit_m_s
 
             for event in events:
                 tolerance = 0.05 if event["type"] == "stop" else 1e-4
@@ -208,12 +213,12 @@ class TrainSimulator:
                 regen_power = (self.eff_mass * brake_application) * current_v * self.regen_efficiency
                 current_v = max(0.0, current_v - actual_decel * dt)
 
-            elif current_v < min(current_limit_m_s, max_safe_v) - 1e-4:
+            elif current_v < min(effective_limit_m_s, max_safe_v) - 1e-4:
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + (self.eff_mass * self.max_accel) + f_gradient
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
                 current_v = max(0.0, min(current_v + ((actual_force - f_resist - f_gradient) / self.eff_mass) * dt,
-                                         current_limit_m_s, max_safe_v))
+                                         effective_limit_m_s, max_safe_v))
                 mech_power = max(0.0, actual_force * current_v)
             else:
                 f_resist = self.get_resistance(current_v)
@@ -226,7 +231,7 @@ class TrainSimulator:
             history["km"].append(current_km)
             history["cum_dist_km"].append(global_start_dist + (distance_covered / 1000.0))
             history["v_actual"].append(current_v * 3.6)
-            history["v_limit"].append(current_limit_m_s * 3.6)
+            history["v_limit"].append(track_limit_front_m_s * 3.6)
             history["energy_kwh"].append(total_energy_j / 3_600_000.0)
             history["regen_kwh"].append(total_regen_j / 3_600_000.0)
 
@@ -242,7 +247,7 @@ class TrainSimulator:
                     history["km"].append(current_km)
                     history["cum_dist_km"].append(global_start_dist + (distance_covered / 1000.0))
                     history["v_actual"].append(0.0)
-                    history["v_limit"].append(current_limit_m_s * 3.6)
+                    history["v_limit"].append(track_limit_front_m_s * 3.6)
                     history["energy_kwh"].append(total_energy_j / 3_600_000.0)
                     history["regen_kwh"].append(total_regen_j / 3_600_000.0)
                     if _ == 0:
@@ -445,7 +450,6 @@ if builder_mode == "Manual (Leg-by-Leg)":
             if i == 0:
                 start_station = st.selectbox(f"Start Station", station_names, key=f"start_{i}")
             else:
-                # FORCE UI UPDATE: Give the disabled widget only ONE choice, which is the previous end station
                 prev_end = itinerary_config[i - 1]["end"]
                 st.selectbox(f"Start Station (Locked)", [prev_end], index=0, disabled=True, key=f"start_{i}")
                 start_station = prev_end
