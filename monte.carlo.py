@@ -466,5 +466,6 @@ else:
     fig.update_layout(showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
+
     st.success(
         "✅ **Data generation complete.** You can copy the values from the table above directly into your academic manuscript!")
