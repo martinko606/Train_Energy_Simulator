@@ -303,38 +303,68 @@ class TrainSimulator:
     def run_simulation(self, track, start_km, end_km, stop_mode, stop_prob, dwell_time, record_history=False):
         total_dist_m = abs(start_km - end_km) * 1000
         direction = -1 if start_km > end_km else 1
+
+        # Build and sort events by distance from start
         events, stops_km, stops_names = self._build_events(track, start_km, end_km, stop_mode, stop_prob, direction)
 
-        dt, current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 1.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        # Sort events by how soon we will hit them
+        if direction == 1:
+            events.sort(key=lambda x: x["km"])
+        else:
+            events.sort(key=lambda x: x["km"], reverse=True)
+
+        dt = 1.0 if record_history else 2.0  # Double the timestep for background MC runs
+        current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 0.0, 0.0, 0.0, 0.0, 0.0
         g_accel = 9.8186
 
         history = {"time_s": [], "km": [], "cum_dist_km": [], "v_actual": [], "v_limit": [], "energy_kwh": [],
                    "regen_kwh": []} if record_history else None
 
+        # Keep track of which event we are looking at to avoid looping through the whole list
+        current_event_idx = 0
+        total_events = len(events)
+
         while distance_covered < total_dist_m:
             current_km = start_km + (distance_covered / 1000.0) * direction
             rear_km = current_km - (self.train_length_m / 1000.0) * direction
+
+            # Lookup track properties (this is still slightly slow, but necessary for length)
             effective_limit_m_s, slope = track.get_effective_limit_and_grad(current_km, rear_km)
 
             f_gradient = self.mass_kg * g_accel * slope
             effective_decel = max(0.05, self.max_decel + (g_accel * slope))
             max_safe_v = effective_limit_m_s
 
-            for event in events:
-                tolerance = 0.05 if event["type"] == "stop" else 1e-4
-                is_ahead = (event["km"] <= current_km + tolerance) if direction == -1 else (
-                        event["km"] >= current_km - tolerance)
-                overshot = (current_km < event["km"]) if direction == -1 else (current_km > event["km"])
+            # FAST EVENT CHECKING: Only look at upcoming events, not past ones
+            while current_event_idx < total_events:
+                next_event = events[current_event_idx]
+                tolerance = 0.05 if next_event["type"] == "stop" else 1e-4
 
-                if not is_ahead: continue
+                # Have we passed this event?
+                is_ahead = (next_event["km"] <= current_km + tolerance) if direction == -1 else (
+                            next_event["km"] >= current_km - tolerance)
+
+                if not is_ahead:
+                    current_event_idx += 1  # We passed it, never look at it again
+                    continue
+                else:
+                    break  # We found the immediate next event
+
+            # Look ahead logic (only check the next few upcoming events, not all of them)
+            lookahead_limit = min(current_event_idx + 3, total_events)
+            for i in range(current_event_idx, lookahead_limit):
+                event = events[i]
+                overshot = (current_km < event["km"]) if direction == -1 else (current_km > event["km"])
                 dist_to_event = 0.0 if (event["type"] == "stop" and overshot) else abs(current_km - event["km"]) * 1000
 
                 if event["target_v"] < current_v:
+                    # Braking curve math
                     safe_v = math.sqrt(max(0.0, event["target_v"] ** 2 + 2 * effective_decel * dist_to_event))
                     max_safe_v = min(max_safe_v, safe_v)
 
             mech_power, regen_power = 0.0, 0.0
 
+            # Record telemetry
             if record_history:
                 track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
                 history["time_s"].append(journey_time_s)
@@ -345,7 +375,9 @@ class TrainSimulator:
                 history["energy_kwh"].append(total_energy_j / 3_600_000.0)
                 history["regen_kwh"].append(total_regen_j / 3_600_000.0)
 
+            # --- PHYSICS ---
             if current_v > max_safe_v + 1e-4:
+                # Braking
                 f_resist = self.get_resistance(current_v)
                 natural_decel = (f_resist + f_gradient) / self.eff_mass
                 required_decel = (current_v - max_safe_v) / dt
@@ -357,13 +389,18 @@ class TrainSimulator:
                 current_v = max(0.0, current_v - actual_decel * dt)
 
             elif current_v < min(effective_limit_m_s, max_safe_v) - 1e-4:
+                # Accelerating
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + (self.eff_mass * self.max_accel) + f_gradient
+
+                # Protect against divide by zero at v=0
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
+
                 current_v = max(0.0, min(current_v + ((actual_force - f_resist - f_gradient) / self.eff_mass) * dt,
                                          effective_limit_m_s, max_safe_v))
                 mech_power = max(0.0, actual_force * current_v)
             else:
+                # Cruising
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + f_gradient
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
@@ -375,28 +412,33 @@ class TrainSimulator:
             distance_covered += current_v * dt
             journey_time_s += dt
 
-            if current_v < 0.5 and any(abs(current_km - s) <= 0.05 for s in stops_km):
-                current_v = 0.0
+            # Stop handling
+            if current_v < 0.5 and current_event_idx < total_events:
+                # Did we just hit a stop event?
+                close_events = [e for e in events[current_event_idx:current_event_idx + 2] if
+                                e["type"] == "stop" and abs(current_km - e["km"]) <= 0.05]
 
-                if record_history:
-                    for _ in range(2):
-                        track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
-                        history["time_s"].append(journey_time_s)
-                        history["km"].append(current_km)
-                        history["cum_dist_km"].append(distance_covered / 1000.0)
-                        history["v_actual"].append(0.0)
-                        history["v_limit"].append(track_limit_front_m_s * 3.6)
-                        history["energy_kwh"].append(total_energy_j / 3_600_000.0)
-                        history["regen_kwh"].append(total_regen_j / 3_600_000.0)
-                        if _ == 0:
-                            total_energy_j += self.aux_power_w * dwell_time
-                            journey_time_s += dwell_time
-                else:
-                    total_energy_j += self.aux_power_w * dwell_time
-                    journey_time_s += dwell_time
+                if close_events:
+                    current_v = 0.0
+                    if record_history:
+                        for _ in range(2):
+                            track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
+                            history["time_s"].append(journey_time_s)
+                            history["km"].append(current_km)
+                            history["cum_dist_km"].append(distance_covered / 1000.0)
+                            history["v_actual"].append(0.0)
+                            history["v_limit"].append(track_limit_front_m_s * 3.6)
+                            history["energy_kwh"].append(total_energy_j / 3_600_000.0)
+                            history["regen_kwh"].append(total_regen_j / 3_600_000.0)
+                            if _ == 0:
+                                total_energy_j += self.aux_power_w * dwell_time
+                                journey_time_s += dwell_time
+                    else:
+                        total_energy_j += self.aux_power_w * dwell_time
+                        journey_time_s += dwell_time
 
-                events = [e for e in events if not (e["type"] == "stop" and abs(e["km"] - current_km) <= 0.05)]
-                stops_km = [s for s in stops_km if abs(s - current_km) > 0.05]
+                    # Force the event index forward so we don't get stuck stopping
+                    current_event_idx += len(close_events)
 
         return history, stops_names, {
             "net_kwh": (total_energy_j - total_regen_j) / 3_600_000.0,
