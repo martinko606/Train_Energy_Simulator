@@ -99,7 +99,6 @@ def load_railml_from_zip(zip_path):
 
             # --- Extract Operational Points (Nodes) ---
             if tag_name == 'operationalPoint':
-                # We must keep ALL nodes (even junctions) to maintain a connected graph!
                 op_type = "IGNORE"
 
                 op_ops = elem.find(f"{ns}opOperations")
@@ -116,7 +115,6 @@ def load_railml_from_zip(zip_path):
                 op_name = elem.find(f"{ns}name")
                 name_val = op_name.get("name") if op_name is not None else "Unknown"
 
-                # Extract connections to line segments
                 connected_lines = []
                 for c in elem.findall(f"{ns}connectedToLine"):
                     ref = c.get("ref")
@@ -131,6 +129,12 @@ def load_railml_from_zip(zip_path):
             # --- Extract Lines (Edges/Micro-Segments) ---
             elif tag_name == 'line':
                 line_id = elem.get("id")
+
+                # Extract Line Name based on user preference instead of designator
+                line_name = "Unknown"
+                line_name_elem = elem.find(f"{ns}name")
+                if line_name_elem is not None and line_name_elem.get("name"):
+                    line_name = line_name_elem.get("name").strip()
 
                 lin_loc = elem.find(f"{ns}linearLocation")
                 km_start, km_end = 0.0, 0.0
@@ -171,7 +175,8 @@ def load_railml_from_zip(zip_path):
                     "km_end": km_end,
                     "v_limit": v_limit,
                     "grad": grad,
-                    "endpoints": []
+                    "endpoints": [],
+                    "line_name": line_name
                 }
 
             # Free memory dynamically
@@ -198,7 +203,8 @@ def load_railml_from_zip(zip_path):
                     "v": endpoints[1],
                     "length": length,
                     "v_limit": l_data["v_limit"],
-                    "grad": l_data["grad"]
+                    "grad": l_data["grad"],
+                    "line_name": l_data["line_name"]
                 })
 
         return stations_dict, valid_edges
@@ -213,7 +219,7 @@ def load_railml_from_zip(zip_path):
 # ==========================================
 #  TOPOLOGICAL PATHFINDER (DIJKSTRA)
 # ==========================================
-@st.cache_resource
+# Removed cache_resource so it accurately responds to dynamically filtered subgraphs
 def build_route_profile(start_name, end_name, nodes, edges, is_reverse=False):
     """
     Searches the graph for the shortest route between two stations and stitches
@@ -643,16 +649,46 @@ st.sidebar.success(f"Network Topological Graph Built!")
 # --- 1. ROUTE SELECTION (GRAPH PATHFINDING) ---
 st.sidebar.header("1. Route Selection")
 
-# Extract only passenger stations for the dropdown
-passenger_stations = [n["name"] for nid, n in nodes.items() if n["type"] in ["X", "R"] and n["name"] != "Unknown"]
+all_line_names = sorted(list(set(e["line_name"] for e in edges if e["line_name"] != "Unknown")))
+
+if not all_line_names:
+    st.error("No named lines found in the dataset.")
+    st.stop()
+
+selected_lines = st.sidebar.multiselect(
+    "Select Railway Line(s)",
+    all_line_names,
+    default=[all_line_names[0]],
+    help="Select one or more lines to combine for your route."
+)
+
+if not selected_lines:
+    st.warning("Please select at least one railway line to populate the stations.")
+    st.stop()
+
+# Dynamically filter the nodes and edges based on selected lines
+filtered_edges = [e for e in edges if e["line_name"] in selected_lines]
+
+valid_node_ids = set()
+for e in filtered_edges:
+    valid_node_ids.add(e["u"])
+    valid_node_ids.add(e["v"])
+
+filtered_nodes = {nid: n for nid, n in nodes.items() if nid in valid_node_ids}
+
+# Extract only passenger stations for the dropdown from the FILTERED subset
+passenger_stations = [n["name"] for nid, n in filtered_nodes.items() if
+                      n["type"] in ["X", "R"] and n["name"] != "Unknown"]
 passenger_stations = sorted(list(set(passenger_stations)))
 
 if not passenger_stations:
-    st.error("No valid passenger stations found in the railML file.")
+    st.error("No valid passenger stations found in the selected lines.")
     st.stop()
 
 mc_start = st.sidebar.selectbox("Terminal A", passenger_stations, index=0)
 mc_end = st.sidebar.selectbox("Terminal B", passenger_stations, index=len(passenger_stations) - 1)
+
+line_display_name = ", ".join(selected_lines) if len(selected_lines) <= 2 else f"{len(selected_lines)} Selected Lines"
 
 # --- 2. TRAIN PARAMETERS ---
 st.sidebar.header("2. Train Parameters")
@@ -710,16 +746,16 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
 
     with st.spinner(f"Finding path and running Monte Carlo (N={mc_runs})..."):
         try:
-            track_1 = build_route_profile(mc_start, mc_end, nodes, edges, is_reverse=False)
+            track_1 = build_route_profile(mc_start, mc_end, filtered_nodes, filtered_edges, is_reverse=False)
             if not track_1:
-                st.error(f"No valid physical route found between {mc_start} and {mc_end}.")
+                st.error(f"No valid physical route found between {mc_start} and {mc_end} on the selected lines.")
                 st.stop()
 
             k_a = 0.0
             k_b = track_1.segments[-1]["km_high"] if track_1.segments else 0.0
 
             # The reverse trip flips gradients internally so the simulator can run backwards
-            track_2 = build_route_profile(mc_start, mc_end, nodes, edges, is_reverse=True)
+            track_2 = build_route_profile(mc_start, mc_end, filtered_nodes, filtered_edges, is_reverse=True)
 
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
@@ -790,7 +826,8 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                             "Expected Savings": round(base_worst_unit - base_best_unit, 2), "Type": "Baseline"})
 
             st.session_state.mc_results = {"df": pd.DataFrame(results), "start": mc_start, "end": mc_end,
-                                           "runs": mc_runs, "unit": "Liters" if traction == "DIESEL" else "kWh",
+                                           "line": line_display_name, "runs": mc_runs,
+                                           "unit": "Liters" if traction == "DIESEL" else "kWh",
                                            "total_legs": total_legs, "cycles": num_cycles, "pattern": trip_pattern,
                                            "mand_per_leg": round(mand_per_leg, 1), "req_per_leg": round(req_per_leg, 1)}
         except Exception as e:
@@ -804,10 +841,10 @@ if c_plot.button("📈 Plot Run", use_container_width=True):
     with st.spinner(f"Finding path and generating Representative Run..."):
         try:
             is_primary_dir = plot_dir.startswith(mc_start)
-            track = build_route_profile(mc_start, mc_end, nodes, edges, is_reverse=not is_primary_dir)
+            track = build_route_profile(mc_start, mc_end, filtered_nodes, filtered_edges, is_reverse=not is_primary_dir)
 
             if not track:
-                st.error("No valid route found.")
+                st.error("No valid route found on the selected lines.")
                 st.stop()
 
             p_start = 0.0
@@ -823,8 +860,8 @@ if c_plot.button("📈 Plot Run", use_container_width=True):
             st.session_state.rep_results = {"history": history, "stops_names": stops_names, "stats": stats,
                                             "start_name": mc_start if is_primary_dir else mc_end,
                                             "end_name": mc_end if is_primary_dir else mc_start, "prob": plot_prob,
-                                            "track": track, "traction": traction, "efficiency": efficiency,
-                                            "diesel_density": diesel_density}
+                                            "line": line_display_name, "track": track, "traction": traction,
+                                            "efficiency": efficiency, "diesel_density": diesel_density}
         except Exception as e:
             st.error(f"Error generating plot: {e}")
 
@@ -841,7 +878,7 @@ with tab_mc:
         df = mc["df"]
         unit = mc["unit"]
 
-        st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']}")
+        st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']} (Line(s): {mc['line']})")
         st.markdown(
             f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}  \n**Stops Per Leg:** {mc['mand_per_leg']} Mandatory | {mc['req_per_leg']} Request")
         st.dataframe(df.drop(columns=["Prob_Num"]), use_container_width=True, hide_index=True)
@@ -861,7 +898,8 @@ with tab_plot:
         st.info("👈 **Configure parameters in Section 5 of the sidebar, then click 'Plot Run'.**")
     else:
         rep = st.session_state.rep_results
-        st.subheader(f"Representative Run: {rep['start_name']} ➔ {rep['end_name']} (P = {int(rep['prob'] * 100)}%)")
+        st.subheader(
+            f"Representative Run: {rep['start_name']} ➔ {rep['end_name']} (Line(s): {rep['line']}, P = {int(rep['prob'] * 100)}%)")
 
         m, s = int(rep["stats"]["journey_time_s"] // 60), int(rep["stats"]["journey_time_s"] % 60)
         c1, c2, c3 = st.columns(3)
