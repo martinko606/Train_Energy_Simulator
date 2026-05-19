@@ -200,7 +200,7 @@ class TrainSimulator:
             for event in events:
                 tolerance = 0.05 if event["type"] == "stop" else 1e-4
                 is_ahead = (event["km"] <= current_km + tolerance) if direction == -1 else (
-                            event["km"] >= current_km - tolerance)
+                        event["km"] >= current_km - tolerance)
                 overshot = (current_km < event["km"]) if direction == -1 else (current_km > event["km"])
 
                 if not is_ahead: continue
@@ -496,6 +496,7 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
             # Shift Logic Variables
             n_fwd = num_cycles
             n_rev = num_cycles if trip_pattern == "Round Trip (A ➔ B ➔ A)" else 0
+            total_legs = n_fwd + n_rev
 
             # Deterministic Baselines (Fast, no history tracking)
             _, w_stops_1, w_stats_1 = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end], "all",
@@ -515,13 +516,15 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
             # Scale baselines
             base_worst_unit = (get_unit(w_stats_1) * n_fwd) + (get_unit(w_stats_2) * n_rev)
             base_best_unit = (get_unit(b_stats_1) * n_fwd) + (get_unit(b_stats_2) * n_rev)
+
             base_worst_time = (w_stats_1["journey_time_s"] * n_fwd) + (w_stats_2["journey_time_s"] * n_rev)
             base_best_time = (b_stats_1["journey_time_s"] * n_fwd) + (b_stats_2["journey_time_s"] * n_rev)
+
             base_worst_stops = (len(w_stops_1) * n_fwd) + (len(w_stops_2) * n_rev)
             base_best_stops = (len(b_stops_1) * n_fwd) + (len(b_stops_2) * n_rev)
 
-            shift_mandatory_stops = base_best_stops
-            shift_request_stops = base_worst_stops - base_best_stops
+            mand_per_leg = base_best_stops / total_legs
+            req_per_leg = (base_worst_stops - base_best_stops) / total_legs
 
             # Stochastic Loops (Fast, no history tracking)
             results = []
@@ -546,9 +549,7 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                     "Probability": f"{int(p * 100)}%",
                     "Prob_Num": int(p * 100),
                     "Avg Stops per Run": round(s_sum / mc_runs, 1),
-                    "Mandatory Stops": shift_mandatory_stops,
-                    "Request Stops": shift_request_stops,
-                    "Request Stops Made": round((s_sum / mc_runs) - shift_mandatory_stops, 1),
+                    "Req. Stops Made/Leg": round(((s_sum / mc_runs) - base_best_stops) / total_legs, 2),
                     "Avg Time": format_time(t_sum / mc_runs),
                     "Expected Consumed": round(e_sum / mc_runs, 2),
                     "Expected Savings": round(base_worst_unit - (e_sum / mc_runs), 2),
@@ -559,9 +560,7 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                 "Probability": "100% (Worst Case)",
                 "Prob_Num": 100,
                 "Avg Stops per Run": base_worst_stops,
-                "Mandatory Stops": shift_mandatory_stops,
-                "Request Stops": shift_request_stops,
-                "Request Stops Made": shift_request_stops,
+                "Req. Stops Made/Leg": round(req_per_leg, 2),
                 "Avg Time": format_time(base_worst_time),
                 "Expected Consumed": round(base_worst_unit, 2),
                 "Expected Savings": 0.0,
@@ -571,9 +570,7 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                 "Probability": "0% (Best Case)",
                 "Prob_Num": 0,
                 "Avg Stops per Run": base_best_stops,
-                "Mandatory Stops": shift_mandatory_stops,
-                "Request Stops": shift_request_stops,
-                "Request Stops Made": 0,
+                "Req. Stops Made/Leg": 0.0,
                 "Avg Time": format_time(base_best_time),
                 "Expected Consumed": round(base_best_unit, 2),
                 "Expected Savings": round(base_worst_unit - base_best_unit, 2),
@@ -581,9 +578,16 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
             })
 
             st.session_state.mc_results = {
-                "df": pd.DataFrame(results), "start": mc_start, "end": mc_end, "runs": mc_runs,
+                "df": pd.DataFrame(results),
+                "start": mc_start,
+                "end": mc_end,
+                "runs": mc_runs,
                 "unit": "Liters" if traction == "DIESEL" else "kWh",
-                "total_legs": n_fwd + n_rev, "cycles": num_cycles, "pattern": trip_pattern
+                "total_legs": total_legs,
+                "cycles": num_cycles,
+                "pattern": trip_pattern,
+                "mand_per_leg": round(mand_per_leg, 1),
+                "req_per_leg": round(req_per_leg, 1)
             }
         except Exception as e:
             st.error(f"Error during Monte Carlo: {e}")
@@ -633,7 +637,9 @@ with tab_mc:
 
         st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']}")
         st.markdown(
-            f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}")
+            f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}  \n"
+            f"**Stops Per Leg:** {mc['mand_per_leg']} Mandatory | {mc['req_per_leg']} Request"
+        )
         st.caption(
             f"Based on **{mc['runs']}** iterations per probability tier. Data loaded from **{selected_track_file}**.")
 
