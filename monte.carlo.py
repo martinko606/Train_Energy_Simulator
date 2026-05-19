@@ -468,4 +468,4 @@ else:
 
 
     st.success(
-        "✅ **Data generation complete.** You can copy the values from the table above directly into your academic manuscript!")
+        "✅ **Data generation complete")
