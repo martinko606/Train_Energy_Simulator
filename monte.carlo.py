@@ -15,7 +15,7 @@ from lxml import etree
 #  CONFIGURATION
 # ==========================================
 # 📍 SPECIFY YOUR ZIP FILE NAME HERE
-RAILML_ZIP_PATH = "railML_data.zip"
+RAILML_ZIP_PATH = "railML_export_20251214_20260414.zip"
 
 # ==========================================
 #  PRE-DEFINED VEHICLE FLEET
