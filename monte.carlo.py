@@ -520,6 +520,9 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
             base_worst_stops = (len(w_stops_1) * n_fwd) + (len(w_stops_2) * n_rev)
             base_best_stops = (len(b_stops_1) * n_fwd) + (len(b_stops_2) * n_rev)
 
+            shift_mandatory_stops = base_best_stops
+            shift_request_stops = base_worst_stops - base_best_stops
+
             # Stochastic Loops (Fast, no history tracking)
             results = []
             for p in [0.8, 0.6, 0.4, 0.2]:
@@ -541,7 +544,10 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
 
                 results.append({
                     "Probability": f"{int(p * 100)}%",
-                    "Avg Stops": round(s_sum / mc_runs, 1),
+                    "Prob_Num": int(p * 100),
+                    "Avg Stops per Run": round(s_sum / mc_runs, 1),
+                    "Mandatory Stops": shift_mandatory_stops,
+                    "Request Stops": shift_request_stops,
                     "Avg Time": format_time(t_sum / mc_runs),
                     "Expected Consumed": round(e_sum / mc_runs, 2),
                     "Expected Savings": round(base_worst_unit - (e_sum / mc_runs), 2),
@@ -549,13 +555,22 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                 })
 
             results.insert(0, {
-                "Probability": "100% (Worst Case)", "Avg Stops": base_worst_stops,
+                "Probability": "100% (Worst Case)",
+                "Prob_Num": 100,
+                "Avg Stops per Run": base_worst_stops,
+                "Mandatory Stops": shift_mandatory_stops,
+                "Request Stops": shift_request_stops,
                 "Avg Time": format_time(base_worst_time),
-                "Expected Consumed": round(base_worst_unit, 2), "Expected Savings": 0.0,
+                "Expected Consumed": round(base_worst_unit, 2),
+                "Expected Savings": 0.0,
                 "Type": "Baseline"
             })
             results.append({
-                "Probability": "0% (Best Case)", "Avg Stops": base_best_stops,
+                "Probability": "0% (Best Case)",
+                "Prob_Num": 0,
+                "Avg Stops per Run": base_best_stops,
+                "Mandatory Stops": shift_mandatory_stops,
+                "Request Stops": shift_request_stops,
                 "Avg Time": format_time(base_best_time),
                 "Expected Consumed": round(base_best_unit, 2),
                 "Expected Savings": round(base_worst_unit - base_best_unit, 2),
@@ -619,22 +634,25 @@ with tab_mc:
         st.caption(
             f"Based on **{mc['runs']}** iterations per probability tier. Data loaded from **{selected_track_file}**.")
 
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        display_df = df.drop(columns=["Prob_Num"])
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         # Plotting Expected Values including Baselines
-        fig = px.bar(df, x="Probability", y="Expected Savings",
+        fig = px.bar(df, x="Prob_Num", y="Expected Savings",
                      title=f"Expected Savings vs. Stopping Policy ({unit})",
-                     labels={"Expected Savings": f"Savings vs. All Stops ({unit})", "Probability": "Stopping Policy"},
+                     labels={"Expected Savings": f"Savings vs. All Stops ({unit})",
+                             "Prob_Num": "Request Stop Probability (%)"},
                      color="Expected Savings", color_continuous_scale="Blues",
                      text="Expected Savings")
 
-        # Make columns narrower and place text outside to prevent overlay
-        fig.update_traces(width=0.45, texttemplate='%{text:.2f}', textposition='outside')
+        # Make columns a bit wider
+        fig.update_traces(width=10, texttemplate='%{text:.2f}', textposition='outside')
 
         # Scale y-axis slightly to ensure the outside text is not clipped by the top border
         max_y = df["Expected Savings"].max()
         fig.update_layout(
             showlegend=False,
+            xaxis=dict(range=[-10, 110], tickvals=[0, 20, 40, 60, 80, 100]),
             yaxis_range=[0, max_y * 1.15] if max_y > 0 else [0, 1]
         )
 
