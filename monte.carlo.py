@@ -60,14 +60,13 @@ if "rep_results" not in st.session_state:
 
 
 # ==========================================
-#  RAILML DATA LOADER (FROM ZIP)
+#  RAILML DATA LOADER (FROM ZIP) WITH TOPOLOGY
 # ==========================================
 @st.cache_data
 def load_railml_from_zip(zip_path):
     """
-    Extracts railML XML from a ZIP archive, parses necessary topology using
-    memory-efficient iterparse, and builds stations and segments dataframes.
-    Filters out non-passenger infrastructure (blocks, junctions).
+    Extracts railML XML, builds a topological graph of stations and segments,
+    and groups them by their overarching Line Number (Trať).
     """
     if not os.path.exists(zip_path):
         return None, None
@@ -76,7 +75,6 @@ def load_railml_from_zip(zip_path):
     xml_file_path = None
 
     try:
-        # Extract ZIP
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
             for root, dirs, files in os.walk(temp_dir):
@@ -90,8 +88,8 @@ def load_railml_from_zip(zip_path):
         if not xml_file_path:
             return None, None
 
-        stations = []
-        segments = []
+        stations_dict = {}
+        lines_dict = {}
         ns = "{*}"
 
         context = etree.iterparse(xml_file_path, events=('end',), tag=[f"{ns}operationalPoint", f"{ns}line"])
@@ -99,7 +97,7 @@ def load_railml_from_zip(zip_path):
         for event, elem in context:
             tag_name = etree.QName(elem.tag).localname
 
-            # --- Extract Operational Points (Stations & Stops) ---
+            # --- Extract Operational Points ---
             if tag_name == 'operationalPoint':
                 op_type = None
 
@@ -119,24 +117,49 @@ def load_railml_from_zip(zip_path):
                         del elem.getparent()[0]
                     continue
 
+                op_id = elem.get("id")
                 op_name = elem.find(f"{ns}name")
                 name_val = op_name.get("name") if op_name is not None else "Unknown"
-                spot_loc = elem.find(f"{ns}spotLocation")
-                km_val = None
 
-                if spot_loc is not None:
-                    lin_coord = spot_loc.find(f"{ns}linearCoordinate")
-                    if lin_coord is not None:
+                km_val = 0.0
+                spot_locs = elem.findall(f"{ns}spotLocation")
+                for spot in spot_locs:
+                    lc = spot.find(f"{ns}linearCoordinate")
+                    if lc is not None and lc.get("measure"):
                         try:
-                            km_val = float(lin_coord.get("measure"))
+                            km_val = float(lc.get("measure"))
+                            break  # Pick the first valid km measure
                         except:
                             pass
 
-                if km_val is not None:
-                    stations.append({"Dopravní bod": name_val, "Poloha": km_val, "Zastavení": op_type})
+                # Extract topological connections to segments
+                connected_lines = []
+                for c in elem.findall(f"{ns}connectedToLine"):
+                    ref = c.get("ref")
+                    if ref: connected_lines.append(ref)
+
+                stations_dict[op_id] = {
+                    "name": name_val,
+                    "type": op_type,
+                    "km": km_val,
+                    "connected": connected_lines
+                }
 
             # --- Extract Lines (Segments) ---
             elif tag_name == 'line':
+                line_id = elem.get("id")
+                line_num = "Unknown"
+
+                # Extract the Line Number (Trať) from designator
+                for des in elem.findall(f"{ns}designator"):
+                    reg = des.get("register", "").upper()
+                    entry = des.get("entry", "")
+                    if reg in ["SŽDC", "DYPOD", "SZDC"]:
+                        line_num = entry
+                        break
+                    elif not line_num and entry:
+                        line_num = entry
+
                 lin_loc = elem.find(f"{ns}linearLocation")
                 km_start, km_end = 0.0, 0.0
                 if lin_loc is not None:
@@ -171,17 +194,53 @@ def load_railml_from_zip(zip_path):
                     except:
                         pass
 
-                if abs(km_end - km_start) > 0:
-                    segments.append(
-                        {"Poloha_Start": km_start, "Poloha_End": km_end, "Rychlost": v_limit, "Sklon": grad})
+                lines_dict[line_id] = {
+                    "line_num": line_num,
+                    "km_start": km_start,
+                    "km_end": km_end,
+                    "v_limit": v_limit,
+                    "grad": grad
+                }
 
-            # Clear element to free memory dynamically
+            # Free memory
             elem.clear()
             while elem.getprevious() is not None:
                 del elem.getparent()[0]
 
-        df_stations = pd.DataFrame(stations).drop_duplicates(subset=["Dopravní bod"]).sort_values(by="Poloha",
-                                                                                                  ascending=False)
+        # --- Resolve Topology and Group by Line Number ---
+        stations = []
+        for op_id, data in stations_dict.items():
+            # Find overarching line number based on connected segments
+            line_nums = set()
+            for ref in data["connected"]:
+                if ref in lines_dict:
+                    l_num = lines_dict[ref]["line_num"]
+                    if l_num != "Unknown":
+                        line_nums.add(l_num)
+
+            if not line_nums:
+                line_nums.add("Unknown")
+
+            for l_num in line_nums:
+                stations.append({
+                    "Line_Num": l_num,
+                    "Dopravní bod": data["name"],
+                    "Poloha": data["km"],
+                    "Zastavení": data["type"]
+                })
+
+        segments = []
+        for l_id, data in lines_dict.items():
+            if abs(data["km_end"] - data["km_start"]) > 0:
+                segments.append({
+                    "Line_Num": data["line_num"],
+                    "Poloha_Start": data["km_start"],
+                    "Poloha_End": data["km_end"],
+                    "Rychlost": data["v_limit"],
+                    "Sklon": data["grad"]
+                })
+
+        df_stations = pd.DataFrame(stations).drop_duplicates(subset=["Line_Num", "Dopravní bod"])
         df_segments = pd.DataFrame(segments)
 
         return df_stations, df_segments
@@ -200,12 +259,9 @@ class TrackProfile:
     def __init__(self, df_stations: pd.DataFrame, df_segments: pd.DataFrame, is_forward_direction: bool,
                  route_start: float, route_end: float):
         self.is_forward = is_forward_direction
-
-        # Determine strict boundaries with a small buffer for boundary conditions
         km_min = min(route_start, route_end) - 0.5
         km_max = max(route_start, route_end) + 0.5
 
-        # Build optimized profile targeting ONLY the specified route segment
         self.segments = self._build_filtered_segments(df_segments, km_min, km_max)
         self.stations = self._extract_filtered_stations(df_stations, km_min, km_max)
         self.station_dict = {s["name"]: s["km"] for s in self.stations}
@@ -215,8 +271,6 @@ class TrackProfile:
         for _, row in df_segments.iterrows():
             km_high = max(row["Poloha_Start"], row["Poloha_End"])
             km_low = min(row["Poloha_Start"], row["Poloha_End"])
-
-            # Skip segments totally outside our route bounds
             if km_high < km_min or km_low > km_max:
                 continue
 
@@ -232,7 +286,6 @@ class TrackProfile:
             name = str(row.get("Dopravní bod", "")).strip()
             stop_type = str(row["Zastavení"]).strip().upper()
             km_pos = float(row["Poloha"])
-
             if name and name != "nan" and (km_min <= km_pos <= km_max):
                 stations.append({"name": name, "km": km_pos, "type": stop_type})
         return stations
@@ -268,7 +321,6 @@ class TrainSimulator:
         km_min, km_max = min(start_km, end_km), max(start_km, end_km)
         stops_km, stops_names, events = [], [], []
 
-        # Stations
         for station in track.stations:
             km = station["km"]
             if not (km_min <= km <= km_max) or abs(km - start_km) < 0.01:
@@ -288,7 +340,6 @@ class TrainSimulator:
                 stops_names.append(station["name"])
                 events.append({"km": km, "target_v": 0.0, "type": "stop"})
 
-        # Speed limits
         for seg in track.segments:
             boundary_km = seg["km_high"] if direction == -1 else seg["km_low"]
             if km_min - 0.01 <= boundary_km <= km_max + 0.01:
@@ -301,11 +352,8 @@ class TrainSimulator:
         direction = -1 if start_km > end_km else 1
 
         events, stops_km, stops_names = self._build_events(track, start_km, end_km, stop_mode, stop_prob, direction)
-
-        # Optimizing event search by sorting chronologically
         events.sort(key=lambda x: x["km"], reverse=(direction == -1))
 
-        # Dynamically set timestep (Fast for MC loops, high-res for plots)
         dt = 1.0 if record_history else 2.0
         current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 0.0, 0.0, 0.0, 0.0, 0.0
         g_accel = 9.8186
@@ -316,18 +364,17 @@ class TrainSimulator:
         current_event_idx = 0
         total_events = len(events)
         stall_counter = 0
-        MAX_JOURNEY_TIME = 14400  # Failsafe limit: 4 hours
+        MAX_JOURNEY_TIME = 14400
 
         while distance_covered < total_dist_m:
 
-            # --- FAILSAFE CHECKS ---
             if journey_time_s > MAX_JOURNEY_TIME:
                 st.warning("Simulation aborted: Journey exceeded maximum safe limit of 4 hours.")
                 break
 
             if current_v < 0.01 and current_event_idx >= total_events:
                 stall_counter += dt
-                if stall_counter > 300:  # Stuck for 5 minutes
+                if stall_counter > 300:
                     st.warning("Simulation aborted: Train stalled. Likely insufficient power for the gradient.")
                     break
             else:
@@ -342,7 +389,6 @@ class TrainSimulator:
             effective_decel = max(0.05, self.max_decel + (g_accel * slope))
             max_safe_v = effective_limit_m_s
 
-            # Fast event lookahead (advance pointer if passed)
             while current_event_idx < total_events:
                 next_event = events[current_event_idx]
                 tolerance = 0.05 if next_event["type"] == "stop" else 1e-4
@@ -376,7 +422,6 @@ class TrainSimulator:
                 history["energy_kwh"].append(total_energy_j / 3_600_000.0)
                 history["regen_kwh"].append(total_regen_j / 3_600_000.0)
 
-            # Traction Physics
             if current_v > max_safe_v + 1e-4:
                 f_resist = self.get_resistance(current_v)
                 natural_decel = (f_resist + f_gradient) / self.eff_mass
@@ -407,7 +452,6 @@ class TrainSimulator:
             distance_covered += current_v * dt
             journey_time_s += dt
 
-            # Stop handling (Check if velocity hit zero and we have a valid stop event nearby)
             if current_v < 0.5 and current_event_idx < total_events:
                 close_events = [e for e in events[current_event_idx:current_event_idx + 2] if
                                 e["type"] == "stop" and abs(current_km - e["km"]) <= 0.05]
@@ -544,13 +588,35 @@ if df_stations is None or df_stations.empty:
     st.error(f"Failed to load railML. Please ensure {RAILML_ZIP_PATH} exists and contains valid railML.")
     st.stop()
 
-station_names = df_stations["Dopravní bod"].tolist()
-station_dict = dict(zip(df_stations["Dopravní bod"], df_stations["Poloha"]))
-
 st.sidebar.header("📂 Data Source")
 st.sidebar.success(f"Loaded network from {RAILML_ZIP_PATH}")
 
-st.sidebar.header("1. Train Parameters")
+# --- 1. ROUTE SELECTION (TOPOLOGICAL FILTERING) ---
+st.sidebar.header("1. Route Selection")
+line_options = sorted([str(l) for l in df_segments["Line_Num"].unique() if str(l) != "Unknown"])
+if not line_options:
+    line_options = ["Unknown"]
+
+selected_line = st.sidebar.selectbox("Railway Line (Trať)", line_options,
+                                     help="Filters the kilometric system to a specific contiguous line.")
+
+# Isolate the dataframes to ONLY the selected line
+df_line_stations = df_stations[df_stations["Line_Num"] == selected_line].sort_values(by="Poloha", ascending=False)
+df_line_segments = df_segments[df_segments["Line_Num"] == selected_line]
+
+station_names = df_line_stations["Dopravní bod"].tolist()
+if not station_names:
+    st.error("No passenger stations found for this specific line.")
+    st.stop()
+
+station_dict = dict(zip(df_line_stations["Dopravní bod"], df_line_stations["Poloha"]))
+
+mc_start = st.sidebar.selectbox("Terminal A", station_names, index=0)
+mc_end = st.sidebar.selectbox("Terminal B", station_names,
+                              index=len(station_names) - 1 if len(station_names) > 0 else 0)
+
+# --- 2. TRAIN PARAMETERS ---
+st.sidebar.header("2. Train Parameters")
 vehicle_choice = st.sidebar.selectbox("Vehicle Profile", ["Custom"] + list(PREDEFINED_VEHICLES.keys()))
 
 if vehicle_choice == "Custom":
@@ -580,18 +646,18 @@ else:
     diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0,
                                              step=0.1) if traction == "DIESEL" else 10.0
 
-st.sidebar.header("2. Shift Configuration")
-mc_start = st.sidebar.selectbox("Terminal A", station_names, index=0)
-mc_end = st.sidebar.selectbox("Terminal B", station_names, index=len(station_names) - 1)
-
+# --- 3. SHIFT CONFIGURATION ---
+st.sidebar.header("3. Shift Configuration")
 trip_pattern = st.sidebar.radio("Trip Pattern", ["Single Direction (A ➔ B)", "Round Trip (A ➔ B ➔ A)"])
 num_cycles = st.sidebar.number_input("Number of Cycles", min_value=1, max_value=20, value=1)
 
-st.sidebar.header("3. Stochastic Settings")
+# --- 4. STOCHASTIC SETTINGS ---
+st.sidebar.header("4. Stochastic Settings")
 mc_runs = st.sidebar.number_input("N (Runs per Probability)", min_value=10, max_value=1000, value=100, step=10)
 mc_dwell = st.sidebar.number_input("Dwell Time (s)", value=30, step=5)
 
-st.sidebar.header("4. Representative Graph")
+# --- 5. REPRESENTATIVE GRAPH ---
+st.sidebar.header("5. Representative Graph")
 plot_dir = st.sidebar.radio("Plot Direction", [f"{mc_start} ➔ {mc_end}", f"{mc_end} ➔ {mc_start}"])
 plot_prob = st.sidebar.slider("Stop Probability for Plot", 0.0, 1.0, 0.4, 0.1)
 plot_x_axis = st.sidebar.radio("Plot X-Axis", ["Distance (km)", "Time (MM:SS)"])
@@ -609,11 +675,11 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
         st.sidebar.error("Start and End stations cannot be the same!")
         st.stop()
 
-    with st.spinner(f"Running Monte Carlo (N={mc_runs})..."):
+    with st.spinner(f"Running Monte Carlo (N={mc_runs}) on Line {selected_line}..."):
         try:
             k_a, k_b = station_dict[mc_start], station_dict[mc_end]
-            track_1 = get_cached_track_profile(k_a, k_b, df_stations, df_segments, k_a > k_b)
-            track_2 = get_cached_track_profile(k_b, k_a, df_stations, df_segments, k_b > k_a)
+            track_1 = get_cached_track_profile(k_a, k_b, df_line_stations, df_line_segments, k_a > k_b)
+            track_2 = get_cached_track_profile(k_b, k_a, df_line_stations, df_line_segments, k_b > k_a)
 
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
@@ -684,7 +750,8 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                             "Expected Savings": round(base_worst_unit - base_best_unit, 2), "Type": "Baseline"})
 
             st.session_state.mc_results = {"df": pd.DataFrame(results), "start": mc_start, "end": mc_end,
-                                           "runs": mc_runs, "unit": "Liters" if traction == "DIESEL" else "kWh",
+                                           "line": selected_line, "runs": mc_runs,
+                                           "unit": "Liters" if traction == "DIESEL" else "kWh",
                                            "total_legs": total_legs, "cycles": num_cycles, "pattern": trip_pattern,
                                            "mand_per_leg": round(mand_per_leg, 1), "req_per_leg": round(req_per_leg, 1)}
         except Exception as e:
@@ -695,22 +762,22 @@ if c_plot.button("📈 Plot Run", use_container_width=True):
         st.sidebar.error("Start and End stations cannot be the same!")
         st.stop()
 
-    with st.spinner("Generating Representative Run telemetry..."):
+    with st.spinner(f"Generating Representative Run for Line {selected_line}..."):
         try:
             is_primary_dir = plot_dir.startswith(mc_start)
             p_start = station_dict[mc_start] if is_primary_dir else station_dict[mc_end]
             p_end = station_dict[mc_end] if is_primary_dir else station_dict[mc_start]
 
-            track = get_cached_track_profile(p_start, p_end, df_stations, df_segments, p_start > p_end)
+            track = get_cached_track_profile(p_start, p_end, df_line_stations, df_line_segments, p_start > p_end)
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
             history, stops_names, stats = sim.run_simulation(track, p_start, p_end, "random", plot_prob, mc_dwell,
                                                              record_history=True)
             st.session_state.rep_results = {"history": history, "stops_names": stops_names, "stats": stats,
                                             "start_name": mc_start if is_primary_dir else mc_end,
-                                            "end_name": mc_end if is_primary_dir else mc_start, "prob": plot_prob,
-                                            "track": track, "traction": traction, "efficiency": efficiency,
-                                            "diesel_density": diesel_density}
+                                            "end_name": mc_end if is_primary_dir else mc_start, "line": selected_line,
+                                            "prob": plot_prob, "track": track, "traction": traction,
+                                            "efficiency": efficiency, "diesel_density": diesel_density}
         except Exception as e:
             st.error(f"Error generating plot: {e}")
 
@@ -727,7 +794,7 @@ with tab_mc:
         df = mc["df"]
         unit = mc["unit"]
 
-        st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']}")
+        st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']} (Line: {mc['line']})")
         st.markdown(
             f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}  \n**Stops Per Leg:** {mc['mand_per_leg']} Mandatory | {mc['req_per_leg']} Request")
         st.dataframe(df.drop(columns=["Prob_Num"]), use_container_width=True, hide_index=True)
@@ -744,10 +811,11 @@ with tab_mc:
 
 with tab_plot:
     if st.session_state.rep_results is None:
-        st.info("👈 **Configure parameters in Section 4 of the sidebar, then click 'Plot Run'.**")
+        st.info("👈 **Configure parameters in Section 5 of the sidebar, then click 'Plot Run'.**")
     else:
         rep = st.session_state.rep_results
-        st.subheader(f"Representative Run: {rep['start_name']} ➔ {rep['end_name']} (P = {int(rep['prob'] * 100)}%)")
+        st.subheader(
+            f"Representative Run: {rep['start_name']} ➔ {rep['end_name']} (Line: {rep['line']}, P = {int(rep['prob'] * 100)}%)")
 
         m, s = int(rep["stats"]["journey_time_s"] // 60), int(rep["stats"]["journey_time_s"] % 60)
         c1, c2, c3 = st.columns(3)
