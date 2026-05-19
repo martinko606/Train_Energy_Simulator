@@ -320,7 +320,7 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         x_title = "Cumulative Distance (km)"
         x_format = None
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.15)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.25)
 
     # Distinct line styling for black & white or standard print reading
     fig.add_trace(go.Scatter(x=x_data, y=history["v_limit"], name="Speed Limit",
@@ -363,11 +363,11 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
 
             annotations.append(
-                dict(x=x_pos, y=-0.15, xref="x", yref="y domain", text=station["name"].title(), showarrow=False,
+                dict(x=x_pos, y=-0.08, xref="x", yref="y domain", text=station["name"].title(), showarrow=False,
                      font=dict(family="Times New Roman, serif", size=12, color=color), xanchor="right", yanchor="top",
                      textangle=-45))
             annotations.append(
-                dict(x=x_pos, y=-0.15, xref="x", yref="y2 domain", text=station["name"].title(), showarrow=False,
+                dict(x=x_pos, y=-0.08, xref="x", yref="y2 domain", text=station["name"].title(), showarrow=False,
                      font=dict(family="Times New Roman, serif", size=12, color=color), xanchor="right", yanchor="top",
                      textangle=-45))
         except ValueError:
@@ -377,12 +377,12 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
     fig.update_layout(
         template="simple_white",
         font=dict(family="Times New Roman, serif", size=14, color="black"),
-        height=800, margin=dict(l=60, r=40, t=40, b=150), hovermode="x unified",
+        height=900, margin=dict(l=60, r=40, t=40, b=180), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(showgrid=True, gridcolor='lightgray', title=x_title, range=[x_min, x_max], tickformat=x_format,
-                   showticklabels=True, linecolor='black', mirror=True),
-        xaxis2=dict(showgrid=True, gridcolor='lightgray', title=x_title, range=[x_min, x_max], tickformat=x_format,
-                    showticklabels=True, linecolor='black', mirror=True),
+        xaxis=dict(showgrid=True, gridcolor='lightgray', title=dict(text=x_title, standoff=80), range=[x_min, x_max],
+                   tickformat=x_format, showticklabels=True, linecolor='black', mirror=True),
+        xaxis2=dict(showgrid=True, gridcolor='lightgray', title=dict(text=x_title, standoff=80), range=[x_min, x_max],
+                    tickformat=x_format, showticklabels=True, linecolor='black', mirror=True),
         yaxis=dict(title="Speed (km/h)", showgrid=True, gridcolor='lightgray', linecolor='black', mirror=True),
         yaxis2=dict(title="Energy (kWh)", showgrid=True, gridcolor='lightgray', linecolor='black', mirror=True),
         shapes=shapes, annotations=annotations
@@ -621,13 +621,23 @@ with tab_mc:
 
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        chart_df = df[df["Type"] == "Stochastic"].copy()
-        fig = px.bar(chart_df, x="Probability", y="Expected Savings",
-                     title=f"Expected Savings vs. Probability ({unit})",
-                     labels={"Expected Savings": f"Savings vs. All Stops ({unit})",
-                             "Probability": "Request Stop Probability"},
-                     color="Expected Savings", color_continuous_scale="Blues")
-        fig.update_layout(showlegend=False)
+        # Plotting Expected Values including Baselines
+        fig = px.bar(df, x="Probability", y="Expected Savings",
+                     title=f"Expected Savings vs. Stopping Policy ({unit})",
+                     labels={"Expected Savings": f"Savings vs. All Stops ({unit})", "Probability": "Stopping Policy"},
+                     color="Expected Savings", color_continuous_scale="Blues",
+                     text="Expected Savings")
+
+        # Make columns narrower and place text outside to prevent overlay
+        fig.update_traces(width=0.45, texttemplate='%{text:.2f}', textposition='outside')
+
+        # Scale y-axis slightly to ensure the outside text is not clipped by the top border
+        max_y = df["Expected Savings"].max()
+        fig.update_layout(
+            showlegend=False,
+            yaxis_range=[0, max_y * 1.15] if max_y > 0 else [0, 1]
+        )
+
         st.plotly_chart(fig, use_container_width=True)
 
 with tab_plot:
@@ -659,7 +669,7 @@ with tab_plot:
             f"**Stops Made during this specific run:** {', '.join(rep['stops_names']) if rep['stops_names'] else 'None'}")
 
         st.markdown("---")
-        st.subheader("📥 Export for Publication")
+        st.subheader("📥 Export")
         st.write(
             "You can use the built-in camera icon in the top right of the graph to download a PNG. Alternatively, download the raw telemetry data below to plot the graph natively in LaTeX (using `pgfplots`) or Excel.")
 
