@@ -69,6 +69,7 @@ def load_railml_from_zip(zip_path):
     """
     Extracts railML XML from a ZIP archive, parses necessary topology using
     memory-efficient iterparse, and builds stations and segments dataframes.
+    Filters out non-passenger infrastructure (blocks, junctions).
     """
     if not os.path.exists(zip_path):
         st.error(f"Cannot find ZIP file at: {zip_path}")
@@ -81,7 +82,6 @@ def load_railml_from_zip(zip_path):
         # 1. Extract ZIP
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
-            # Find the XML file (ignore .xsd)
             for root, dirs, files in os.walk(temp_dir):
                 for file in files:
                     if file.lower().endswith('.xml') or file.lower().endswith('.railml'):
@@ -97,8 +97,6 @@ def load_railml_from_zip(zip_path):
         # 2. Parse XML efficiently using lxml iterparse
         stations = []
         segments = []
-
-        # Namespace wildcard for lxml
         ns = "{*}"
 
         context = etree.iterparse(xml_file_path, events=('end',), tag=[f"{ns}operationalPoint", f"{ns}line"])
@@ -106,22 +104,33 @@ def load_railml_from_zip(zip_path):
         for event, elem in context:
             tag_name = etree.QName(elem.tag).localname
 
-            # --- Extract Operational Points (Stations)  ---
+            # --- Extract Operational Points (Stations & Stops) ---
             if tag_name == 'operationalPoint':
-                op_name = elem.find(f"{ns}name")
-                name_val = op_name.get("name") if op_name is not None else "Unknown"
+                op_type = None  # Default to None to filter out infrastructure points
 
-                # Default type to X (Mandatory stop) for the simulator logic
-                op_type = "X"
+                # Check operational type based on DYPOD specs
                 op_ops = elem.find(f"{ns}opOperations")
                 if op_ops is not None:
                     op_op = op_ops.find(f"{ns}opOperation")
-                    if op_op is not None and op_op.get("operationalType") == "stoppingPoint":
-                        op_type = "X"
-                    else:
-                        op_type = "R"  # Treat other non-stopping points as request/skip
+                    if op_op is not None:
+                        op_cat = op_op.get("operationalType")
 
-                # Get KM Position
+                        if op_cat == "station":
+                            op_type = "X"  # Mandatory train station
+                        elif op_cat == "stoppingPoint":
+                            op_type = "R"  # Request stop (e.g., "zastávka" / "z")
+
+                # If it is a block, junction, crossover, siding, etc., completely ignore it
+                if op_type is None:
+                    elem.clear()
+                    while elem.getprevious() is not None:
+                        del elem.getparent()[0]
+                    continue
+
+                # If it passed the filter, get name and location
+                op_name = elem.find(f"{ns}name")
+                name_val = op_name.get("name") if op_name is not None else "Unknown"
+
                 spot_loc = elem.find(f"{ns}spotLocation")
                 km_val = None
                 if spot_loc is not None:
@@ -139,12 +148,10 @@ def load_railml_from_zip(zip_path):
                         "Zastavení": op_type
                     })
 
-            # --- Extract Lines (Segments)  ---
+            # --- Extract Lines (Segments) ---
             elif tag_name == 'line':
-                # Get start/end coords
                 lin_loc = elem.find(f"{ns}linearLocation")
-                km_start = 0.0
-                km_end = 0.0
+                km_start, km_end = 0.0, 0.0
                 if lin_loc is not None:
                     assoc = lin_loc.find(f"{ns}associatedNetElement")
                     if assoc is not None:
@@ -161,8 +168,7 @@ def load_railml_from_zip(zip_path):
                             except:
                                 pass
 
-                # Get Max Speed and Gradient [cite: 341, 352]
-                v_limit = 80.0  # Default fallback
+                v_limit = 80.0
                 perf = elem.find(f"{ns}linePerformance")
                 if perf is not None and perf.get("maxSpeed"):
                     try:
@@ -186,7 +192,7 @@ def load_railml_from_zip(zip_path):
                         "Sklon": grad
                     })
 
-            # Free memory (crucial for large files)
+            # Free memory
             elem.clear()
             while elem.getprevious() is not None:
                 del elem.getparent()[0]
