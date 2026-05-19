@@ -4,6 +4,8 @@ import pandas as pd
 import random
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 # ==========================================
@@ -44,6 +46,8 @@ st.set_page_config(page_title="Monte Carlo Fleet Simulator", layout="wide")
 
 if "mc_results" not in st.session_state:
     st.session_state.mc_results = None
+if "rep_results" not in st.session_state:
+    st.session_state.rep_results = None
 
 
 # ==========================================
@@ -173,13 +177,16 @@ class TrainSimulator:
 
         return events, stops_km, stops_names
 
-    def run_simulation(self, track, start_km, end_km, stop_mode, stop_prob, dwell_time):
+    def run_simulation(self, track, start_km, end_km, stop_mode, stop_prob, dwell_time, record_history=False):
         total_dist_m = abs(start_km - end_km) * 1000
         direction = -1 if start_km > end_km else 1
         events, stops_km, stops_names = self._build_events(track, start_km, end_km, stop_mode, stop_prob, direction)
 
         dt, current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 1.0, 0.0, 0.0, 0.0, 0.0, 0.0
         g_accel = 9.8186
+
+        history = {"time_s": [], "km": [], "cum_dist_km": [], "v_actual": [], "v_limit": [], "energy_kwh": [],
+                   "regen_kwh": []} if record_history else None
 
         while distance_covered < total_dist_m:
             current_km = start_km + (distance_covered / 1000.0) * direction
@@ -204,6 +211,17 @@ class TrainSimulator:
                     max_safe_v = min(max_safe_v, safe_v)
 
             mech_power, regen_power = 0.0, 0.0
+
+            # Record telemetry if requested
+            if record_history:
+                track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
+                history["time_s"].append(journey_time_s)
+                history["km"].append(current_km)
+                history["cum_dist_km"].append(distance_covered / 1000.0)
+                history["v_actual"].append(current_v * 3.6)
+                history["v_limit"].append(track_limit_front_m_s * 3.6)
+                history["energy_kwh"].append(total_energy_j / 3_600_000.0)
+                history["regen_kwh"].append(total_regen_j / 3_600_000.0)
 
             if current_v > max_safe_v + 1e-4:
                 f_resist = self.get_resistance(current_v)
@@ -237,13 +255,28 @@ class TrainSimulator:
 
             if current_v < 0.5 and any(abs(current_km - s) <= 0.05 for s in stops_km):
                 current_v = 0.0
-                total_energy_j += self.aux_power_w * dwell_time
-                journey_time_s += dwell_time
+
+                if record_history:
+                    for _ in range(2):
+                        track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
+                        history["time_s"].append(journey_time_s)
+                        history["km"].append(current_km)
+                        history["cum_dist_km"].append(distance_covered / 1000.0)
+                        history["v_actual"].append(0.0)
+                        history["v_limit"].append(track_limit_front_m_s * 3.6)
+                        history["energy_kwh"].append(total_energy_j / 3_600_000.0)
+                        history["regen_kwh"].append(total_regen_j / 3_600_000.0)
+                        if _ == 0:
+                            total_energy_j += self.aux_power_w * dwell_time
+                            journey_time_s += dwell_time
+                else:
+                    total_energy_j += self.aux_power_w * dwell_time
+                    journey_time_s += dwell_time
 
                 events = [e for e in events if not (e["type"] == "stop" and abs(e["km"] - current_km) <= 0.05)]
                 stops_km = [s for s in stops_km if abs(s - current_km) > 0.05]
 
-        return None, stops_names, {
+        return history, stops_names, {
             "net_kwh": (total_energy_j - total_regen_j) / 3_600_000.0,
             "journey_time_s": journey_time_s,
         }
@@ -258,11 +291,111 @@ def format_time(seconds: float) -> str:
     return f"{m:02d}m {s:02d}s"
 
 
+def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis_mode):
+    # Publication Ready Styling
+    base_time = pd.to_datetime("1970-01-01")
+    time_dt_arr = [base_time + pd.to_timedelta(s, unit='s') for s in history["time_s"]]
+    dist_arr = history["cum_dist_km"]
+    stops_set = set(stops_names)
+    net = [g - r for g, r in zip(history["energy_kwh"], history["regen_kwh"])]
+
+    if x_axis_mode == "Time (MM:SS)":
+        x_data = time_dt_arr
+        total_duration = history["time_s"][-1]
+        buffer_seconds = max(30, int(total_duration * 0.03))
+        x_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
+        x_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
+
+        if total_duration >= 3600:
+            x_format = "%H:%M:%S"
+            x_title = "Cumulative Time (HH:MM:SS)"
+        else:
+            x_format = "%M:%S"
+            x_title = "Cumulative Time (MM:SS)"
+    else:
+        x_data = dist_arr
+        buffer_km = max(0.5, (dist_arr[-1] - dist_arr[0]) * 0.03)
+        x_min = dist_arr[0] - buffer_km
+        x_max = dist_arr[-1] + buffer_km
+        x_title = "Cumulative Distance (km)"
+        x_format = None
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.15)
+
+    # Distinct line styling for black & white or standard print reading
+    fig.add_trace(go.Scatter(x=x_data, y=history["v_limit"], name="Speed Limit",
+                             line=dict(color="#d62728", width=2, dash="dash")), row=1, col=1)
+    fig.add_trace(
+        go.Scatter(x=x_data, y=history["v_actual"], name="Actual Speed", line=dict(color="#1f77b4", width=2.5),
+                   fill="tozeroy", fillcolor="rgba(31, 119, 180, 0.1)"), row=1, col=1)
+
+    fig.add_trace(
+        go.Scatter(x=x_data, y=history["energy_kwh"], name="Gross Energy", line=dict(color="#ff7f0e", width=2.5)),
+        row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_data, y=net, name="Net Energy", line=dict(color="#2ca02c", width=2, dash="dot")),
+                  row=2, col=1)
+
+    if is_electric:
+        fig.add_trace(go.Scatter(x=x_data, y=history["regen_kwh"], name="Regen Recovered",
+                                 line=dict(color="#9467bd", width=2, dash="dashdot")), row=2, col=1)
+
+    shapes, annotations = [], []
+    v_max = max(max(history["v_limit"]), max(history["v_actual"])) * 1.05
+    e_max = max(history["energy_kwh"]) * 1.05
+
+    for station in all_stations:
+        if station["type"] not in ["X", "R"]: continue
+        skm = station["km"]
+
+        route_min, route_max = min(history["km"]), max(history["km"])
+        if not (route_min - 0.05 <= skm <= route_max + 0.05): continue
+
+        # Grey for mandatory, Black/Blue for executed stops, Red for skipped stops (easier to read)
+        color = "gray" if station["type"] == "X" else ("black" if station["name"] in stops_set else "#d62728")
+
+        try:
+            idx = (np.abs(np.array(history["km"]) - skm)).argmin()
+            x_pos = time_dt_arr[idx] if x_axis_mode == "Time (MM:SS)" else dist_arr[idx]
+
+            shapes.append(dict(type="line", xref="x", yref="y", x0=x_pos, x1=x_pos, y0=0, y1=v_max,
+                               line=dict(color=color, width=1, dash="dot"), layer="below"))
+            shapes.append(dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos, y0=0, y1=e_max,
+                               line=dict(color=color, width=1, dash="dot"), layer="below"))
+
+            annotations.append(
+                dict(x=x_pos, y=-0.15, xref="x", yref="y domain", text=station["name"].title(), showarrow=False,
+                     font=dict(family="Times New Roman, serif", size=12, color=color), xanchor="right", yanchor="top",
+                     textangle=-45))
+            annotations.append(
+                dict(x=x_pos, y=-0.15, xref="x", yref="y2 domain", text=station["name"].title(), showarrow=False,
+                     font=dict(family="Times New Roman, serif", size=12, color=color), xanchor="right", yanchor="top",
+                     textangle=-45))
+        except ValueError:
+            pass
+
+    # Academic publication theme layout
+    fig.update_layout(
+        template="simple_white",
+        font=dict(family="Times New Roman, serif", size=14, color="black"),
+        height=800, margin=dict(l=60, r=40, t=40, b=150), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis=dict(showgrid=True, gridcolor='lightgray', title=x_title, range=[x_min, x_max], tickformat=x_format,
+                   showticklabels=True, linecolor='black', mirror=True),
+        xaxis2=dict(showgrid=True, gridcolor='lightgray', title=x_title, range=[x_min, x_max], tickformat=x_format,
+                    showticklabels=True, linecolor='black', mirror=True),
+        yaxis=dict(title="Speed (km/h)", showgrid=True, gridcolor='lightgray', linecolor='black', mirror=True),
+        yaxis2=dict(title="Energy (kWh)", showgrid=True, gridcolor='lightgray', linecolor='black', mirror=True),
+        shapes=shapes, annotations=annotations
+    )
+    return fig
+
+
 # ==========================================
 #  MAIN DASHBOARD
 # ==========================================
 st.title("🎲 Monte Carlo Fleet Simulator")
-st.markdown("Dedicated tool for calculating stochastic expected values for regional and mainline railway shifts.")
+st.markdown(
+    "Dedicated tool for calculating stochastic expected values and rendering representative kinematic profiles.")
 
 # --- 0. FILE LOADER WIDGET ---
 st.sidebar.header("📂 Data Source")
@@ -331,8 +464,15 @@ mc_runs = st.sidebar.number_input("N (Runs per Probability)", min_value=10, max_
                                   help="The 'N' variable for the Monte Carlo loops.")
 mc_dwell = st.sidebar.number_input("Dwell Time (s)", value=30, step=5)
 
-# --- RUN BUTTON ---
-if st.sidebar.button("🎲 Run Monte Carlo Analysis", type="primary", use_container_width=True):
+st.sidebar.header("4. Representative Graph")
+st.sidebar.caption("Visualize a single simulated run to view velocity, limits, and energy profiles.")
+plot_dir = st.sidebar.radio("Plot Direction", [f"{mc_start} ➔ {mc_end}", f"{mc_end} ➔ {mc_start}"])
+plot_prob = st.sidebar.slider("Stop Probability for Plot", 0.0, 1.0, 0.4, 0.1)
+plot_x_axis = st.sidebar.radio("Plot X-Axis", ["Distance (km)", "Time (MM:SS)"])
+
+# --- RUN BUTTONS ---
+c_mc, c_plot = st.sidebar.columns(2)
+if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
     if mc_start == mc_end:
         st.sidebar.error("Start and End stations cannot be the same!")
         st.stop()
@@ -349,7 +489,6 @@ if st.sidebar.button("🎲 Run Monte Carlo Analysis", type="primary", use_contai
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
 
-            # Helper to calculate appropriate units
             def get_unit(stats):
                 return stats["net_kwh"] / (diesel_density * efficiency) if traction == "DIESEL" else stats["net_kwh"]
 
@@ -358,49 +497,44 @@ if st.sidebar.button("🎲 Run Monte Carlo Analysis", type="primary", use_contai
             n_fwd = num_cycles
             n_rev = num_cycles if trip_pattern == "Round Trip (A ➔ B ➔ A)" else 0
 
-            # Deterministic Baselines
+            # Deterministic Baselines (Fast, no history tracking)
             _, w_stops_1, w_stats_1 = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end], "all",
-                                                         1.0, mc_dwell)
+                                                         1.0, mc_dwell, record_history=False)
             _, b_stops_1, b_stats_1 = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end], "none",
-                                                         0.0, mc_dwell)
+                                                         0.0, mc_dwell, record_history=False)
 
             if n_rev > 0:
                 _, w_stops_2, w_stats_2 = sim.run_simulation(track_2, station_dict[mc_end], station_dict[mc_start],
-                                                             "all", 1.0, mc_dwell)
+                                                             "all", 1.0, mc_dwell, record_history=False)
                 _, b_stops_2, b_stats_2 = sim.run_simulation(track_2, station_dict[mc_end], station_dict[mc_start],
-                                                             "none", 0.0, mc_dwell)
+                                                             "none", 0.0, mc_dwell, record_history=False)
             else:
                 w_stops_2, w_stats_2 = [], {"journey_time_s": 0, "net_kwh": 0}
                 b_stops_2, b_stats_2 = [], {"journey_time_s": 0, "net_kwh": 0}
 
-            # Scale baselines by the number of cycles
+            # Scale baselines
             base_worst_unit = (get_unit(w_stats_1) * n_fwd) + (get_unit(w_stats_2) * n_rev)
             base_best_unit = (get_unit(b_stats_1) * n_fwd) + (get_unit(b_stats_2) * n_rev)
-
             base_worst_time = (w_stats_1["journey_time_s"] * n_fwd) + (w_stats_2["journey_time_s"] * n_rev)
             base_best_time = (b_stats_1["journey_time_s"] * n_fwd) + (b_stats_2["journey_time_s"] * n_rev)
-
             base_worst_stops = (len(w_stops_1) * n_fwd) + (len(w_stops_2) * n_rev)
             base_best_stops = (len(b_stops_1) * n_fwd) + (len(b_stops_2) * n_rev)
 
-            # Stochastic Loops
+            # Stochastic Loops (Fast, no history tracking)
             results = []
-            for p in [0.2, 0.4, 0.6, 0.8]:
+            for p in [0.8, 0.6, 0.4, 0.2]:
                 t_sum, e_sum, s_sum = 0.0, 0.0, 0.0
                 for _ in range(int(mc_runs)):
-
-                    # Execute Forward Legs
                     for _f in range(n_fwd):
                         _, r_stops, r_stats = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end],
-                                                                 "random", p, mc_dwell)
+                                                                 "random", p, mc_dwell, record_history=False)
                         t_sum += r_stats["journey_time_s"]
                         e_sum += get_unit(r_stats)
                         s_sum += len(r_stops)
 
-                    # Execute Return Legs
                     for _r in range(n_rev):
                         _, r_stops, r_stats = sim.run_simulation(track_2, station_dict[mc_end], station_dict[mc_start],
-                                                                 "random", p, mc_dwell)
+                                                                 "random", p, mc_dwell, record_history=False)
                         t_sum += r_stats["journey_time_s"]
                         e_sum += get_unit(r_stats)
                         s_sum += len(r_stops)
@@ -428,44 +562,114 @@ if st.sidebar.button("🎲 Run Monte Carlo Analysis", type="primary", use_contai
                 "Type": "Baseline"
             })
 
-            df = pd.DataFrame(results)
             st.session_state.mc_results = {
-                "df": df, "start": mc_start, "end": mc_end, "runs": mc_runs,
+                "df": pd.DataFrame(results), "start": mc_start, "end": mc_end, "runs": mc_runs,
                 "unit": "Liters" if traction == "DIESEL" else "kWh",
-                "total_legs": n_fwd + n_rev,
-                "cycles": num_cycles,
-                "pattern": trip_pattern
+                "total_legs": n_fwd + n_rev, "cycles": num_cycles, "pattern": trip_pattern
             }
         except Exception as e:
             st.error(f"Error during Monte Carlo: {e}")
 
+if c_plot.button("📈 Plot Run", use_container_width=True):
+    if mc_start == mc_end:
+        st.sidebar.error("Start and End stations cannot be the same!")
+        st.stop()
+
+    with st.spinner("Generating Representative Run telemetry..."):
+        try:
+            # Parse requested direction
+            is_primary_dir = plot_dir.startswith(mc_start)
+            p_start = station_dict[mc_start] if is_primary_dir else station_dict[mc_end]
+            p_end = station_dict[mc_end] if is_primary_dir else station_dict[mc_start]
+
+            is_fwd = p_start > p_end
+            track = TrackProfile(selected_track_file, is_forward_direction=is_fwd)
+            sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
+
+            # Execute exactly one run WITH history recording turned ON
+            history, stops_names, stats = sim.run_simulation(track, p_start, p_end, "random", plot_prob, mc_dwell,
+                                                             record_history=True)
+
+            st.session_state.rep_results = {
+                "history": history, "stops_names": stops_names, "stats": stats,
+                "start_name": mc_start if is_primary_dir else mc_end,
+                "end_name": mc_end if is_primary_dir else mc_start,
+                "prob": plot_prob, "track": track, "traction": traction,
+                "efficiency": efficiency, "diesel_density": diesel_density
+            }
+        except Exception as e:
+            st.error(f"Error generating plot: {e}")
+
 # ==========================================
-#  MAIN VIEW RENDERER
+#  MAIN VIEW RENDERER (TABS)
 # ==========================================
-if st.session_state.mc_results is None:
-    st.info("👈 **Configure your Shift and Monte Carlo parameters in the sidebar, then click 'Run'.**")
-else:
-    mc = st.session_state.mc_results
-    df = mc["df"]
-    unit = mc["unit"]
+tab_mc, tab_plot = st.tabs(["🎲 Monte Carlo Fleet Analysis", "📈 Representative Run Visualization"])
 
-    st.subheader(f"🎲 Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']}")
-    st.markdown(f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}")
-    st.caption(
-        f"Based on **{mc['runs']}** iterations per probability tier. Data loaded from **{selected_track_file}**.")
+with tab_mc:
+    if st.session_state.mc_results is None:
+        st.info("👈 **Configure your Shift in the sidebar, then click 'Run MC'.**")
+    else:
+        mc = st.session_state.mc_results
+        df = mc["df"]
+        unit = mc["unit"]
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+        st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']}")
+        st.markdown(
+            f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}")
+        st.caption(
+            f"Based on **{mc['runs']}** iterations per probability tier. Data loaded from **{selected_track_file}**.")
 
-    # Plotting Expected Values
-    chart_df = df[df["Type"] == "Stochastic"].copy()
-    fig = px.bar(chart_df, x="Probability", y="Expected Savings",
-                 title=f"Expected Savings vs. Probability ({unit})",
-                 labels={"Expected Savings": f"Savings vs. All Stops ({unit})",
-                         "Probability": "Request Stop Probability"},
-                 color="Expected Savings", color_continuous_scale="Blues")
-    fig.update_layout(showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
+        chart_df = df[df["Type"] == "Stochastic"].copy()
+        fig = px.bar(chart_df, x="Probability", y="Expected Savings",
+                     title=f"Expected Savings vs. Probability ({unit})",
+                     labels={"Expected Savings": f"Savings vs. All Stops ({unit})",
+                             "Probability": "Request Stop Probability"},
+                     color="Expected Savings", color_continuous_scale="Blues")
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.success(
-        "✅ **Data generation complete")
+with tab_plot:
+    if st.session_state.rep_results is None:
+        st.info("👈 **Configure parameters in Section 4 of the sidebar, then click 'Plot Run'.**")
+    else:
+        rep = st.session_state.rep_results
+
+        st.subheader(f"Representative Run: {rep['start_name']} ➔ {rep['end_name']} (P = {int(rep['prob'] * 100)}%)")
+
+        m, s = int(rep["stats"]["journey_time_s"] // 60), int(rep["stats"]["journey_time_s"] % 60)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Run Time", f"{m:02d}:{s:02d}")
+        c2.metric("Stops Made", len(rep["stops_names"]))
+
+        if rep["traction"] == "DIESEL":
+            consumed = rep["stats"]["net_kwh"] / (rep["diesel_density"] * rep["efficiency"])
+            c3.metric("Fuel Consumed", f"{consumed:.1f} L")
+        else:
+            c3.metric("Energy Consumed", f"{rep['stats']['net_kwh']:.1f} kWh")
+
+        fig = create_plotly_figure(rep["history"], rep["stops_names"], rep["track"].stations,
+                                   rep["traction"] == "ELECTRIC", plot_x_axis)
+
+        # Override Streamlit's theme to force the white academic background to show
+        st.plotly_chart(fig, use_container_width=True, theme=None)
+
+        st.caption(
+            f"**Stops Made during this specific run:** {', '.join(rep['stops_names']) if rep['stops_names'] else 'None'}")
+
+        st.markdown("---")
+        st.subheader("📥 Export for Publication")
+        st.write(
+            "You can use the built-in camera icon in the top right of the graph to download a PNG. Alternatively, download the raw telemetry data below to plot the graph natively in LaTeX (using `pgfplots`) or Excel.")
+
+        csv_df = pd.DataFrame(rep["history"])
+        csv_data = csv_df.to_csv(index=False).encode('utf-8')
+
+        st.download_button(
+            label="Download Telemetry Data (CSV)",
+            data=csv_data,
+            file_name=f"kinematic_profile_P{int(rep['prob'] * 100)}.csv",
+            mime="text/csv",
+            help="Download the raw second-by-second physics data to create high-resolution plots in LaTeX."
+        )
