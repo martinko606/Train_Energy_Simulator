@@ -1,5 +1,4 @@
 import math
-import glob
 import pandas as pd
 import random
 import numpy as np
@@ -16,7 +15,7 @@ from lxml import etree
 #  CONFIGURATION
 # ==========================================
 # 📍 SPECIFY YOUR ZIP FILE NAME HERE
-RAILML_ZIP_PATH = "railML_export_20251214_20260414.zip"
+RAILML_ZIP_PATH = "railML_data.zip"
 
 # ==========================================
 #  PRE-DEFINED VEHICLE FLEET
@@ -52,7 +51,6 @@ PREDEFINED_VEHICLES = {
 # ==========================================
 #  STREAMLIT PAGE CONFIG & STATE
 # ==========================================
-
 st.set_page_config(page_title="Monte Carlo Fleet Simulator", layout="wide")
 
 if "mc_results" not in st.session_state:
@@ -72,14 +70,13 @@ def load_railml_from_zip(zip_path):
     Filters out non-passenger infrastructure (blocks, junctions).
     """
     if not os.path.exists(zip_path):
-        st.error(f"Cannot find ZIP file at: {zip_path}")
         return None, None
 
     temp_dir = tempfile.mkdtemp()
     xml_file_path = None
 
     try:
-        # 1. Extract ZIP
+        # Extract ZIP
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
             for root, dirs, files in os.walk(temp_dir):
@@ -91,10 +88,8 @@ def load_railml_from_zip(zip_path):
                     break
 
         if not xml_file_path:
-            st.error("No valid .xml or .railml file found inside the ZIP.")
             return None, None
 
-        # 2. Parse XML efficiently using lxml iterparse
         stations = []
         segments = []
         ns = "{*}"
@@ -106,47 +101,39 @@ def load_railml_from_zip(zip_path):
 
             # --- Extract Operational Points (Stations & Stops) ---
             if tag_name == 'operationalPoint':
-                op_type = None  # Default to None to filter out infrastructure points
+                op_type = None
 
-                # Check operational type based on DYPOD specs
                 op_ops = elem.find(f"{ns}opOperations")
                 if op_ops is not None:
                     op_op = op_ops.find(f"{ns}opOperation")
                     if op_op is not None:
                         op_cat = op_op.get("operationalType")
-
                         if op_cat == "station":
-                            op_type = "X"  # Mandatory train station
+                            op_type = "X"
                         elif op_cat == "stoppingPoint":
-                            op_type = "R"  # Request stop (e.g., "zastávka" / "z")
+                            op_type = "R"
 
-                # If it is a block, junction, crossover, siding, etc., completely ignore it
                 if op_type is None:
                     elem.clear()
                     while elem.getprevious() is not None:
                         del elem.getparent()[0]
                     continue
 
-                # If it passed the filter, get name and location
                 op_name = elem.find(f"{ns}name")
                 name_val = op_name.get("name") if op_name is not None else "Unknown"
-
                 spot_loc = elem.find(f"{ns}spotLocation")
                 km_val = None
+
                 if spot_loc is not None:
                     lin_coord = spot_loc.find(f"{ns}linearCoordinate")
                     if lin_coord is not None:
                         try:
                             km_val = float(lin_coord.get("measure"))
-                        except (ValueError, TypeError):
+                        except:
                             pass
 
                 if km_val is not None:
-                    stations.append({
-                        "Dopravní bod": name_val,
-                        "Poloha": km_val,
-                        "Zastavení": op_type
-                    })
+                    stations.append({"Dopravní bod": name_val, "Poloha": km_val, "Zastavení": op_type})
 
             # --- Extract Lines (Segments) ---
             elif tag_name == 'line':
@@ -185,14 +172,10 @@ def load_railml_from_zip(zip_path):
                         pass
 
                 if abs(km_end - km_start) > 0:
-                    segments.append({
-                        "Poloha_Start": km_start,
-                        "Poloha_End": km_end,
-                        "Rychlost": v_limit,
-                        "Sklon": grad
-                    })
+                    segments.append(
+                        {"Poloha_Start": km_start, "Poloha_End": km_end, "Rychlost": v_limit, "Sklon": grad})
 
-            # Free memory
+            # Clear element to free memory dynamically
             elem.clear()
             while elem.getprevious() is not None:
                 del elem.getparent()[0]
@@ -204,43 +187,54 @@ def load_railml_from_zip(zip_path):
         return df_stations, df_segments
 
     finally:
-        # 3. Clean up temp directory
         for root, dirs, files in os.walk(temp_dir, topdown=False):
-            for name in files:
-                os.remove(os.path.join(root, name))
-            for name in dirs:
-                os.rmdir(os.path.join(root, name))
+            for name in files: os.remove(os.path.join(root, name))
+            for name in dirs: os.rmdir(os.path.join(root, name))
         os.rmdir(temp_dir)
 
 
 # ==========================================
-#  CORE CLASSES (Adapted for internal DataFrame)
+#  CORE CLASSES (Optimized)
 # ==========================================
 class TrackProfile:
-    def __init__(self, df_stations: pd.DataFrame, df_segments: pd.DataFrame, is_forward_direction: bool):
+    def __init__(self, df_stations: pd.DataFrame, df_segments: pd.DataFrame, is_forward_direction: bool,
+                 route_start: float, route_end: float):
         self.is_forward = is_forward_direction
-        self.segments = self._build_segments(df_segments)
-        self.stations = self._extract_stations(df_stations)
+
+        # Determine strict boundaries with a small buffer for boundary conditions
+        km_min = min(route_start, route_end) - 0.5
+        km_max = max(route_start, route_end) + 0.5
+
+        # Build optimized profile targeting ONLY the specified route segment
+        self.segments = self._build_filtered_segments(df_segments, km_min, km_max)
+        self.stations = self._extract_filtered_stations(df_stations, km_min, km_max)
         self.station_dict = {s["name"]: s["km"] for s in self.stations}
 
-    def _build_segments(self, df_segments: pd.DataFrame) -> list:
+    def _build_filtered_segments(self, df_segments: pd.DataFrame, km_min: float, km_max: float) -> list:
         segments = []
         for _, row in df_segments.iterrows():
             km_high = max(row["Poloha_Start"], row["Poloha_End"])
             km_low = min(row["Poloha_Start"], row["Poloha_End"])
+
+            # Skip segments totally outside our route bounds
+            if km_high < km_min or km_low > km_max:
+                continue
+
             v_limit = float(row["Rychlost"]) / 3.6
             grad = float(row["Sklon"]) / 1000.0
             if not self.is_forward: grad *= -1
             segments.append({"km_high": km_high, "km_low": km_low, "v_limit": v_limit, "grad": grad})
         return segments
 
-    def _extract_stations(self, df_stations: pd.DataFrame) -> list:
+    def _extract_filtered_stations(self, df_stations: pd.DataFrame, km_min: float, km_max: float) -> list:
         stations = []
         for _, row in df_stations.iterrows():
             name = str(row.get("Dopravní bod", "")).strip()
             stop_type = str(row["Zastavení"]).strip().upper()
-            if name and name != "nan":
-                stations.append({"name": name, "km": row["Poloha"], "type": stop_type})
+            km_pos = float(row["Poloha"])
+
+            if name and name != "nan" and (km_min <= km_pos <= km_max):
+                stations.append({"name": name, "km": km_pos, "type": stop_type})
         return stations
 
     def get_effective_limit_and_grad(self, front_km: float, rear_km: float) -> tuple:
@@ -274,10 +268,11 @@ class TrainSimulator:
         km_min, km_max = min(start_km, end_km), max(start_km, end_km)
         stops_km, stops_names, events = [], [], []
 
+        # Stations
         for station in track.stations:
             km = station["km"]
-            if not (km_min <= km <= km_max): continue
-            if abs(km - start_km) < 0.01: continue
+            if not (km_min <= km <= km_max) or abs(km - start_km) < 0.01:
+                continue
 
             will_stop = False
             if station["type"] == "X":
@@ -293,6 +288,7 @@ class TrainSimulator:
                 stops_names.append(station["name"])
                 events.append({"km": km, "target_v": 0.0, "type": "stop"})
 
+        # Speed limits
         for seg in track.segments:
             boundary_km = seg["km_high"] if direction == -1 else seg["km_low"]
             if km_min - 0.01 <= boundary_km <= km_max + 0.01:
@@ -304,53 +300,60 @@ class TrainSimulator:
         total_dist_m = abs(start_km - end_km) * 1000
         direction = -1 if start_km > end_km else 1
 
-        # Build and sort events by distance from start
         events, stops_km, stops_names = self._build_events(track, start_km, end_km, stop_mode, stop_prob, direction)
 
-        # Sort events by how soon we will hit them
-        if direction == 1:
-            events.sort(key=lambda x: x["km"])
-        else:
-            events.sort(key=lambda x: x["km"], reverse=True)
+        # Optimizing event search by sorting chronologically
+        events.sort(key=lambda x: x["km"], reverse=(direction == -1))
 
-        dt = 1.0 if record_history else 2.0  # Double the timestep for background MC runs
+        # Dynamically set timestep (Fast for MC loops, high-res for plots)
+        dt = 1.0 if record_history else 2.0
         current_v, distance_covered, total_energy_j, total_regen_j, journey_time_s = 0.0, 0.0, 0.0, 0.0, 0.0
         g_accel = 9.8186
 
         history = {"time_s": [], "km": [], "cum_dist_km": [], "v_actual": [], "v_limit": [], "energy_kwh": [],
                    "regen_kwh": []} if record_history else None
 
-        # Keep track of which event we are looking at to avoid looping through the whole list
         current_event_idx = 0
         total_events = len(events)
+        stall_counter = 0
+        MAX_JOURNEY_TIME = 14400  # Failsafe limit: 4 hours
 
         while distance_covered < total_dist_m:
+
+            # --- FAILSAFE CHECKS ---
+            if journey_time_s > MAX_JOURNEY_TIME:
+                st.warning("Simulation aborted: Journey exceeded maximum safe limit of 4 hours.")
+                break
+
+            if current_v < 0.01 and current_event_idx >= total_events:
+                stall_counter += dt
+                if stall_counter > 300:  # Stuck for 5 minutes
+                    st.warning("Simulation aborted: Train stalled. Likely insufficient power for the gradient.")
+                    break
+            else:
+                stall_counter = 0
+
             current_km = start_km + (distance_covered / 1000.0) * direction
             rear_km = current_km - (self.train_length_m / 1000.0) * direction
 
-            # Lookup track properties (this is still slightly slow, but necessary for length)
             effective_limit_m_s, slope = track.get_effective_limit_and_grad(current_km, rear_km)
 
             f_gradient = self.mass_kg * g_accel * slope
             effective_decel = max(0.05, self.max_decel + (g_accel * slope))
             max_safe_v = effective_limit_m_s
 
-            # FAST EVENT CHECKING: Only look at upcoming events, not past ones
+            # Fast event lookahead (advance pointer if passed)
             while current_event_idx < total_events:
                 next_event = events[current_event_idx]
                 tolerance = 0.05 if next_event["type"] == "stop" else 1e-4
-
-                # Have we passed this event?
                 is_ahead = (next_event["km"] <= current_km + tolerance) if direction == -1 else (
                             next_event["km"] >= current_km - tolerance)
 
                 if not is_ahead:
-                    current_event_idx += 1  # We passed it, never look at it again
-                    continue
+                    current_event_idx += 1
                 else:
-                    break  # We found the immediate next event
+                    break
 
-            # Look ahead logic (only check the next few upcoming events, not all of them)
             lookahead_limit = min(current_event_idx + 3, total_events)
             for i in range(current_event_idx, lookahead_limit):
                 event = events[i]
@@ -358,13 +361,11 @@ class TrainSimulator:
                 dist_to_event = 0.0 if (event["type"] == "stop" and overshot) else abs(current_km - event["km"]) * 1000
 
                 if event["target_v"] < current_v:
-                    # Braking curve math
                     safe_v = math.sqrt(max(0.0, event["target_v"] ** 2 + 2 * effective_decel * dist_to_event))
                     max_safe_v = min(max_safe_v, safe_v)
 
             mech_power, regen_power = 0.0, 0.0
 
-            # Record telemetry
             if record_history:
                 track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
                 history["time_s"].append(journey_time_s)
@@ -375,9 +376,8 @@ class TrainSimulator:
                 history["energy_kwh"].append(total_energy_j / 3_600_000.0)
                 history["regen_kwh"].append(total_regen_j / 3_600_000.0)
 
-            # --- PHYSICS ---
+            # Traction Physics
             if current_v > max_safe_v + 1e-4:
-                # Braking
                 f_resist = self.get_resistance(current_v)
                 natural_decel = (f_resist + f_gradient) / self.eff_mass
                 required_decel = (current_v - max_safe_v) / dt
@@ -389,18 +389,13 @@ class TrainSimulator:
                 current_v = max(0.0, current_v - actual_decel * dt)
 
             elif current_v < min(effective_limit_m_s, max_safe_v) - 1e-4:
-                # Accelerating
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + (self.eff_mass * self.max_accel) + f_gradient
-
-                # Protect against divide by zero at v=0
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
-
                 current_v = max(0.0, min(current_v + ((actual_force - f_resist - f_gradient) / self.eff_mass) * dt,
                                          effective_limit_m_s, max_safe_v))
                 mech_power = max(0.0, actual_force * current_v)
             else:
-                # Cruising
                 f_resist = self.get_resistance(current_v)
                 total_desired_force = f_resist + f_gradient
                 actual_force = max(0.0, min(total_desired_force, self.max_power_w / max(current_v, 0.5)))
@@ -412,12 +407,10 @@ class TrainSimulator:
             distance_covered += current_v * dt
             journey_time_s += dt
 
-            # Stop handling
+            # Stop handling (Check if velocity hit zero and we have a valid stop event nearby)
             if current_v < 0.5 and current_event_idx < total_events:
-                # Did we just hit a stop event?
                 close_events = [e for e in events[current_event_idx:current_event_idx + 2] if
                                 e["type"] == "stop" and abs(current_km - e["km"]) <= 0.05]
-
                 if close_events:
                     current_v = 0.0
                     if record_history:
@@ -437,7 +430,6 @@ class TrainSimulator:
                         total_energy_j += self.aux_power_w * dwell_time
                         journey_time_s += dwell_time
 
-                    # Force the event index forward so we don't get stuck stopping
                     current_event_idx += len(close_events)
 
         return history, stops_names, {
@@ -450,13 +442,11 @@ def format_time(seconds: float) -> str:
     m = int(seconds // 60)
     s = int(seconds % 60)
     h = int(m // 60)
-    if h > 0:
-        return f"{h:02d}h {m % 60:02d}m {s:02d}s"
+    if h > 0: return f"{h:02d}h {m % 60:02d}m {s:02d}s"
     return f"{m:02d}m {s:02d}s"
 
 
 def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis_mode):
-    # [Unchanged Plotly rendering logic]
     base_time = pd.to_datetime("1970-01-01")
     time_dt_arr = [base_time + pd.to_timedelta(s, unit='s') for s in history["time_s"]]
     dist_arr = history["cum_dist_km"]
@@ -514,7 +504,6 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
             shapes.append(dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos, y0=0, y1=e_max,
                                line=dict(color=color, width=1, dash="dot"), layer="below"))
-
             annotations.append(
                 dict(x=x_pos, y=-0.08, xref="x", yref="y domain", text=station["name"].title(), showarrow=False,
                      font=dict(family="Times New Roman, serif", size=12, color=color), xanchor="right", yanchor="top",
@@ -546,26 +535,21 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
 #  MAIN DASHBOARD
 # ==========================================
 st.title("🎲 Monte Carlo Fleet Simulator")
-st.markdown(
-    "Dedicated tool for calculating stochastic expected values and rendering representative kinematic profiles.")
+st.markdown("Dedicated tool for calculating stochastic expected values based on railML data profiles.")
 
-# --- 0. DATA LOAD ---
 with st.spinner("Loading railML data from ZIP..."):
     df_stations, df_segments = load_railml_from_zip(RAILML_ZIP_PATH)
 
 if df_stations is None or df_stations.empty:
-    st.error("Failed to load or parse railML data. Please ensure the ZIP file exists and contains valid railML.")
+    st.error(f"Failed to load railML. Please ensure {RAILML_ZIP_PATH} exists and contains valid railML.")
     st.stop()
 
-# Build dropdown lists
-mandatory_stations = df_stations[df_stations["Zastavení"] == "X"][["Dopravní bod", "Poloha"]].values.tolist()
 station_names = df_stations["Dopravní bod"].tolist()
 station_dict = dict(zip(df_stations["Dopravní bod"], df_stations["Poloha"]))
 
 st.sidebar.header("📂 Data Source")
 st.sidebar.success(f"Loaded network from {RAILML_ZIP_PATH}")
 
-# --- 1. TRAIN PARAMETERS ---
 st.sidebar.header("1. Train Parameters")
 vehicle_choice = st.sidebar.selectbox("Vehicle Profile", ["Custom"] + list(PREDEFINED_VEHICLES.keys()))
 
@@ -577,7 +561,6 @@ if vehicle_choice == "Custom":
     aux_power = st.sidebar.number_input("Auxiliary Power (kW)", value=40, step=5)
     accel = st.sidebar.slider("Max Acceleration (m/s²)", 0.2, 1.2, 0.6, 0.1)
     decel = st.sidebar.slider("Max Braking (m/s²)", 0.4, 1.5, 0.8, 0.1)
-
     if traction == "DIESEL":
         efficiency = st.sidebar.slider("Thermal Efficiency (%)", 15, 60, 35) / 100.0
         diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0, step=0.1)
@@ -594,11 +577,9 @@ else:
     accel = preset["accel"]
     decel = preset["decel"]
     efficiency = preset["efficiency"]
-
     diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0,
                                              step=0.1) if traction == "DIESEL" else 10.0
 
-# --- 2. SHIFT & TRIP BUILDER ---
 st.sidebar.header("2. Shift Configuration")
 mc_start = st.sidebar.selectbox("Terminal A", station_names, index=0)
 mc_end = st.sidebar.selectbox("Terminal B", station_names, index=len(station_names) - 1)
@@ -615,8 +596,13 @@ plot_dir = st.sidebar.radio("Plot Direction", [f"{mc_start} ➔ {mc_end}", f"{mc
 plot_prob = st.sidebar.slider("Stop Probability for Plot", 0.0, 1.0, 0.4, 0.1)
 plot_x_axis = st.sidebar.radio("Plot X-Axis", ["Distance (km)", "Time (MM:SS)"])
 
-# --- RUN BUTTONS ---
 c_mc, c_plot = st.sidebar.columns(2)
+
+
+@st.cache_resource
+def get_cached_track_profile(start_km, end_km, _df_st, _df_seg, is_fwd):
+    return TrackProfile(_df_st, _df_seg, is_fwd, start_km, end_km)
+
 
 if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
     if mc_start == mc_end:
@@ -625,10 +611,9 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
 
     with st.spinner(f"Running Monte Carlo (N={mc_runs})..."):
         try:
-            is_fwd_1 = station_dict[mc_start] > station_dict[mc_end]
-            track_1 = TrackProfile(df_stations, df_segments, is_forward_direction=is_fwd_1)
-            is_fwd_2 = station_dict[mc_end] > station_dict[mc_start]
-            track_2 = TrackProfile(df_stations, df_segments, is_forward_direction=is_fwd_2)
+            k_a, k_b = station_dict[mc_start], station_dict[mc_end]
+            track_1 = get_cached_track_profile(k_a, k_b, df_stations, df_segments, k_a > k_b)
+            track_2 = get_cached_track_profile(k_b, k_a, df_stations, df_segments, k_b > k_a)
 
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
@@ -641,19 +626,17 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
             n_rev = num_cycles if trip_pattern == "Round Trip (A ➔ B ➔ A)" else 0
             total_legs = n_fwd + n_rev
 
-            _, w_stops_1, w_stats_1 = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end], "all",
-                                                         1.0, mc_dwell, record_history=False)
-            _, b_stops_1, b_stats_1 = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end], "none",
-                                                         0.0, mc_dwell, record_history=False)
+            _, w_stops_1, w_stats_1 = sim.run_simulation(track_1, k_a, k_b, "all", 1.0, mc_dwell, record_history=False)
+            _, b_stops_1, b_stats_1 = sim.run_simulation(track_1, k_a, k_b, "none", 0.0, mc_dwell, record_history=False)
 
             if n_rev > 0:
-                _, w_stops_2, w_stats_2 = sim.run_simulation(track_2, station_dict[mc_end], station_dict[mc_start],
-                                                             "all", 1.0, mc_dwell, record_history=False)
-                _, b_stops_2, b_stats_2 = sim.run_simulation(track_2, station_dict[mc_end], station_dict[mc_start],
-                                                             "none", 0.0, mc_dwell, record_history=False)
+                _, w_stops_2, w_stats_2 = sim.run_simulation(track_2, k_b, k_a, "all", 1.0, mc_dwell,
+                                                             record_history=False)
+                _, b_stops_2, b_stats_2 = sim.run_simulation(track_2, k_b, k_a, "none", 0.0, mc_dwell,
+                                                             record_history=False)
             else:
-                w_stops_2, w_stats_2 = [], {"journey_time_s": 0, "net_kwh": 0}
-                b_stops_2, b_stats_2 = [], {"journey_time_s": 0, "net_kwh": 0}
+                w_stops_2, w_stats_2, b_stops_2, b_stats_2 = [], {"journey_time_s": 0, "net_kwh": 0}, [], {
+                    "journey_time_s": 0, "net_kwh": 0}
 
             base_worst_unit = (get_unit(w_stats_1) * n_fwd) + (get_unit(w_stats_2) * n_rev)
             base_best_unit = (get_unit(b_stats_1) * n_fwd) + (get_unit(b_stats_2) * n_rev)
@@ -670,15 +653,14 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                 t_sum, e_sum, s_sum = 0.0, 0.0, 0.0
                 for _ in range(int(mc_runs)):
                     for _f in range(n_fwd):
-                        _, r_stops, r_stats = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end],
-                                                                 "random", p, mc_dwell, record_history=False)
+                        _, r_stops, r_stats = sim.run_simulation(track_1, k_a, k_b, "random", p, mc_dwell,
+                                                                 record_history=False)
                         t_sum += r_stats["journey_time_s"]
                         e_sum += get_unit(r_stats)
                         s_sum += len(r_stops)
-
                     for _r in range(n_rev):
-                        _, r_stops, r_stats = sim.run_simulation(track_2, station_dict[mc_end], station_dict[mc_start],
-                                                                 "random", p, mc_dwell, record_history=False)
+                        _, r_stops, r_stats = sim.run_simulation(track_2, k_b, k_a, "random", p, mc_dwell,
+                                                                 record_history=False)
                         t_sum += r_stats["journey_time_s"]
                         e_sum += get_unit(r_stats)
                         s_sum += len(r_stops)
@@ -718,8 +700,8 @@ if c_plot.button("📈 Plot Run", use_container_width=True):
             is_primary_dir = plot_dir.startswith(mc_start)
             p_start = station_dict[mc_start] if is_primary_dir else station_dict[mc_end]
             p_end = station_dict[mc_end] if is_primary_dir else station_dict[mc_start]
-            is_fwd = p_start > p_end
-            track = TrackProfile(df_stations, df_segments, is_forward_direction=is_fwd)
+
+            track = get_cached_track_profile(p_start, p_end, df_stations, df_segments, p_start > p_end)
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
             history, stops_names, stats = sim.run_simulation(track, p_start, p_end, "random", plot_prob, mc_dwell,
@@ -748,8 +730,7 @@ with tab_mc:
         st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']}")
         st.markdown(
             f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}  \n**Stops Per Leg:** {mc['mand_per_leg']} Mandatory | {mc['req_per_leg']} Request")
-        display_df = df.drop(columns=["Prob_Num"])
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(df.drop(columns=["Prob_Num"]), use_container_width=True, hide_index=True)
 
         fig = px.bar(df, x="Prob_Num", y="Expected Savings", title=f"Expected Savings vs. Stopping Policy ({unit})",
                      labels={"Expected Savings": f"Savings vs. All Stops ({unit})",
@@ -772,15 +753,15 @@ with tab_plot:
         c1, c2, c3 = st.columns(3)
         c1.metric("Run Time", f"{m:02d}:{s:02d}")
         c2.metric("Stops Made", len(rep["stops_names"]))
-
         if rep["traction"] == "DIESEL":
-            consumed = rep["stats"]["net_kwh"] / (rep["diesel_density"] * rep["efficiency"])
-            c3.metric("Fuel Consumed", f"{consumed:.1f} L")
+            c3.metric("Fuel Consumed", f"{rep['stats']['net_kwh'] / (rep['diesel_density'] * rep['efficiency']):.1f} L")
         else:
             c3.metric("Energy Consumed", f"{rep['stats']['net_kwh']:.1f} kWh")
 
         fig = create_plotly_figure(rep["history"], rep["stops_names"], rep["track"].stations,
                                    rep["traction"] == "ELECTRIC", plot_x_axis)
         st.plotly_chart(fig, use_container_width=True, theme=None)
-        st.caption(
-            f"**Stops Made during this specific run:** {', '.join(rep['stops_names']) if rep['stops_names'] else 'None'}")
+
+        csv_data = pd.DataFrame(rep["history"]).to_csv(index=False).encode('utf-8')
+        st.download_button(label="Download Telemetry Data (CSV)", data=csv_data,
+                           file_name=f"kinematic_profile_P{int(rep['prob'] * 100)}.csv", mime="text/csv")
