@@ -7,6 +7,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import zipfile
+import os
+import tempfile
+from lxml import etree
+
+# ==========================================
+#  CONFIGURATION
+# ==========================================
+# 📍 SPECIFY YOUR ZIP FILE NAME HERE
+RAILML_ZIP_PATH = "railML_export_20251214_20260414.zip"
 
 # ==========================================
 #  PRE-DEFINED VEHICLE FLEET
@@ -42,6 +52,7 @@ PREDEFINED_VEHICLES = {
 # ==========================================
 #  STREAMLIT PAGE CONFIG & STATE
 # ==========================================
+
 st.set_page_config(page_title="Monte Carlo Fleet Simulator", layout="wide")
 
 if "mc_results" not in st.session_state:
@@ -51,72 +62,178 @@ if "rep_results" not in st.session_state:
 
 
 # ==========================================
-#  DATA LOADER FOR UI DROPDOWNS
+#  RAILML DATA LOADER (FROM ZIP)
 # ==========================================
 @st.cache_data
-def load_mandatory_stations(filepath):
+def load_railml_from_zip(zip_path):
+    """
+    Extracts railML XML from a ZIP archive, parses necessary topology using
+    memory-efficient iterparse, and builds stations and segments dataframes.
+    """
+    if not os.path.exists(zip_path):
+        st.error(f"Cannot find ZIP file at: {zip_path}")
+        return None, None
+
+    temp_dir = tempfile.mkdtemp()
+    xml_file_path = None
+
     try:
-        df = pd.read_excel(filepath)
-        df.columns = df.columns.str.strip()
-        df["Zastavení"] = df["Zastavení"].fillna("")
-        df["Poloha"] = pd.to_numeric(df["Poloha"], errors="coerce")
-        df = df.dropna(subset=["Poloha"])
-        df["Poloha"] = df["Poloha"].apply(lambda x: x / 1000.0 if x > 1000 else x)
+        # 1. Extract ZIP
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+            # Find the XML file (ignore .xsd)
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file.lower().endswith('.xml') or file.lower().endswith('.railml'):
+                        xml_file_path = os.path.join(root, file)
+                        break
+                if xml_file_path:
+                    break
 
+        if not xml_file_path:
+            st.error("No valid .xml or .railml file found inside the ZIP.")
+            return None, None
+
+        # 2. Parse XML efficiently using lxml iterparse
         stations = []
-        for _, row in df.iterrows():
-            if str(row["Zastavení"]).strip().upper() == "X":
-                name = str(row.get("Dopravní bod", "")).strip()
-                if name and name != "nan":
-                    stations.append((name, row["Poloha"]))
+        segments = []
 
-        return sorted(stations, key=lambda x: x[1], reverse=True)
-    except Exception:
-        return []
+        # Namespace wildcard for lxml
+        ns = "{*}"
+
+        context = etree.iterparse(xml_file_path, events=('end',), tag=[f"{ns}operationalPoint", f"{ns}line"])
+
+        for event, elem in context:
+            tag_name = etree.QName(elem.tag).localname
+
+            # --- Extract Operational Points (Stations)  ---
+            if tag_name == 'operationalPoint':
+                op_name = elem.find(f"{ns}name")
+                name_val = op_name.get("name") if op_name is not None else "Unknown"
+
+                # Default type to X (Mandatory stop) for the simulator logic
+                op_type = "X"
+                op_ops = elem.find(f"{ns}opOperations")
+                if op_ops is not None:
+                    op_op = op_ops.find(f"{ns}opOperation")
+                    if op_op is not None and op_op.get("operationalType") == "stoppingPoint":
+                        op_type = "X"
+                    else:
+                        op_type = "R"  # Treat other non-stopping points as request/skip
+
+                # Get KM Position
+                spot_loc = elem.find(f"{ns}spotLocation")
+                km_val = None
+                if spot_loc is not None:
+                    lin_coord = spot_loc.find(f"{ns}linearCoordinate")
+                    if lin_coord is not None:
+                        try:
+                            km_val = float(lin_coord.get("measure"))
+                        except (ValueError, TypeError):
+                            pass
+
+                if km_val is not None:
+                    stations.append({
+                        "Dopravní bod": name_val,
+                        "Poloha": km_val,
+                        "Zastavení": op_type
+                    })
+
+            # --- Extract Lines (Segments)  ---
+            elif tag_name == 'line':
+                # Get start/end coords
+                lin_loc = elem.find(f"{ns}linearLocation")
+                km_start = 0.0
+                km_end = 0.0
+                if lin_loc is not None:
+                    assoc = lin_loc.find(f"{ns}associatedNetElement")
+                    if assoc is not None:
+                        c_begin = assoc.find(f"{ns}linearCoordinateBegin")
+                        c_end = assoc.find(f"{ns}linearCoordinateEnd")
+                        if c_begin is not None:
+                            try:
+                                km_start = float(c_begin.get("measure"))
+                            except:
+                                pass
+                        if c_end is not None:
+                            try:
+                                km_end = float(c_end.get("measure"))
+                            except:
+                                pass
+
+                # Get Max Speed and Gradient [cite: 341, 352]
+                v_limit = 80.0  # Default fallback
+                perf = elem.find(f"{ns}linePerformance")
+                if perf is not None and perf.get("maxSpeed"):
+                    try:
+                        v_limit = float(perf.get("maxSpeed"))
+                    except:
+                        pass
+
+                grad = 0.0
+                layout = elem.find(f"{ns}lineLayout")
+                if layout is not None and layout.get("maxGradient"):
+                    try:
+                        grad = float(layout.get("maxGradient"))
+                    except:
+                        pass
+
+                if abs(km_end - km_start) > 0:
+                    segments.append({
+                        "Poloha_Start": km_start,
+                        "Poloha_End": km_end,
+                        "Rychlost": v_limit,
+                        "Sklon": grad
+                    })
+
+            # Free memory (crucial for large files)
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+
+        df_stations = pd.DataFrame(stations).drop_duplicates(subset=["Dopravní bod"]).sort_values(by="Poloha",
+                                                                                                  ascending=False)
+        df_segments = pd.DataFrame(segments)
+
+        return df_stations, df_segments
+
+    finally:
+        # 3. Clean up temp directory
+        for root, dirs, files in os.walk(temp_dir, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
+        os.rmdir(temp_dir)
 
 
 # ==========================================
-#  CORE CLASSES
+#  CORE CLASSES (Adapted for internal DataFrame)
 # ==========================================
 class TrackProfile:
-    def __init__(self, excel_filepath: str, is_forward_direction: bool):
+    def __init__(self, df_stations: pd.DataFrame, df_segments: pd.DataFrame, is_forward_direction: bool):
         self.is_forward = is_forward_direction
-        self.df_raw = self._load_from_excel(excel_filepath)
-        self.segments = self._build_segments()
-        self.stations = self._extract_stations()
+        self.segments = self._build_segments(df_segments)
+        self.stations = self._extract_stations(df_stations)
         self.station_dict = {s["name"]: s["km"] for s in self.stations}
 
-    def _load_from_excel(self, filepath: str) -> pd.DataFrame:
-        df = pd.read_excel(filepath)
-        df.columns = df.columns.str.strip()
-        df["Zastavení"] = df["Zastavení"].fillna("")
-        df["Poloha"] = pd.to_numeric(df["Poloha"], errors="coerce")
-        df["Rychlost"] = pd.to_numeric(df["Rychlost"], errors="coerce")
-        df["Sklon"] = pd.to_numeric(df["Sklon"], errors="coerce")
-        df = df.dropna(subset=["Poloha"])
-        df["Poloha"] = df["Poloha"].apply(lambda x: x / 1000.0 if x > 1000 else x)
-        df = df.sort_values(by="Poloha", ascending=False).reset_index(drop=True)
-        df["Rychlost"] = df["Rychlost"].ffill().bfill()
-        df["Sklon"] = df["Sklon"].ffill().bfill().fillna(0)
-        return df
-
-    def _build_segments(self) -> list:
+    def _build_segments(self, df_segments: pd.DataFrame) -> list:
         segments = []
-        for i in range(len(self.df_raw) - 1):
-            km_high = float(self.df_raw.loc[i, "Poloha"])
-            km_low = float(self.df_raw.loc[i + 1, "Poloha"])
-            v_limit = float(self.df_raw.loc[i, "Rychlost"]) / 3.6
-            grad = float(self.df_raw.loc[i, "Sklon"]) / 1000.0
+        for _, row in df_segments.iterrows():
+            km_high = max(row["Poloha_Start"], row["Poloha_End"])
+            km_low = min(row["Poloha_Start"], row["Poloha_End"])
+            v_limit = float(row["Rychlost"]) / 3.6
+            grad = float(row["Sklon"]) / 1000.0
             if not self.is_forward: grad *= -1
             segments.append({"km_high": km_high, "km_low": km_low, "v_limit": v_limit, "grad": grad})
         return segments
 
-    def _extract_stations(self) -> list:
+    def _extract_stations(self, df_stations: pd.DataFrame) -> list:
         stations = []
-        for _, row in self.df_raw.iterrows():
+        for _, row in df_stations.iterrows():
             name = str(row.get("Dopravní bod", "")).strip()
             stop_type = str(row["Zastavení"]).strip().upper()
-            if name and name != "nan" and stop_type in ("X", "R"):
+            if name and name != "nan":
                 stations.append({"name": name, "km": row["Poloha"], "type": stop_type})
         return stations
 
@@ -212,7 +329,6 @@ class TrainSimulator:
 
             mech_power, regen_power = 0.0, 0.0
 
-            # Record telemetry if requested
             if record_history:
                 track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
                 history["time_s"].append(journey_time_s)
@@ -292,7 +408,7 @@ def format_time(seconds: float) -> str:
 
 
 def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis_mode):
-    # Publication Ready Styling
+    # [Unchanged Plotly rendering logic]
     base_time = pd.to_datetime("1970-01-01")
     time_dt_arr = [base_time + pd.to_timedelta(s, unit='s') for s in history["time_s"]]
     dist_arr = history["cum_dist_km"]
@@ -305,13 +421,8 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         buffer_seconds = max(30, int(total_duration * 0.03))
         x_min = time_dt_arr[0] - pd.Timedelta(seconds=buffer_seconds)
         x_max = time_dt_arr[-1] + pd.Timedelta(seconds=buffer_seconds)
-
-        if total_duration >= 3600:
-            x_format = "%H:%M:%S"
-            x_title = "Cumulative Time (HH:MM:SS)"
-        else:
-            x_format = "%M:%S"
-            x_title = "Cumulative Time (MM:SS)"
+        x_format = "%H:%M:%S" if total_duration >= 3600 else "%M:%S"
+        x_title = "Cumulative Time (HH:MM:SS)" if total_duration >= 3600 else "Cumulative Time (MM:SS)"
     else:
         x_data = dist_arr
         buffer_km = max(0.5, (dist_arr[-1] - dist_arr[0]) * 0.03)
@@ -321,14 +432,11 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         x_format = None
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.25)
-
-    # Distinct line styling for black & white or standard print reading
     fig.add_trace(go.Scatter(x=x_data, y=history["v_limit"], name="Speed Limit",
                              line=dict(color="#d62728", width=2, dash="dash")), row=1, col=1)
     fig.add_trace(
         go.Scatter(x=x_data, y=history["v_actual"], name="Actual Speed", line=dict(color="#1f77b4", width=2.5),
                    fill="tozeroy", fillcolor="rgba(31, 119, 180, 0.1)"), row=1, col=1)
-
     fig.add_trace(
         go.Scatter(x=x_data, y=history["energy_kwh"], name="Gross Energy", line=dict(color="#ff7f0e", width=2.5)),
         row=2, col=1)
@@ -346,11 +454,8 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
     for station in all_stations:
         if station["type"] not in ["X", "R"]: continue
         skm = station["km"]
-
         route_min, route_max = min(history["km"]), max(history["km"])
         if not (route_min - 0.05 <= skm <= route_max + 0.05): continue
-
-        # Grey for mandatory, Black/Blue for executed stops, Red for skipped stops (easier to read)
         color = "gray" if station["type"] == "X" else ("black" if station["name"] in stops_set else "#d62728")
 
         try:
@@ -373,20 +478,19 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
         except ValueError:
             pass
 
-    # Academic publication theme layout
-    fig.update_layout(
-        template="simple_white",
-        font=dict(family="Times New Roman, serif", size=14, color="black"),
-        height=900, margin=dict(l=60, r=40, t=40, b=180), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(showgrid=True, gridcolor='lightgray', title=dict(text=x_title, standoff=80), range=[x_min, x_max],
-                   tickformat=x_format, showticklabels=True, linecolor='black', mirror=True),
-        xaxis2=dict(showgrid=True, gridcolor='lightgray', title=dict(text=x_title, standoff=80), range=[x_min, x_max],
-                    tickformat=x_format, showticklabels=True, linecolor='black', mirror=True),
-        yaxis=dict(title="Speed (km/h)", showgrid=True, gridcolor='lightgray', linecolor='black', mirror=True),
-        yaxis2=dict(title="Energy (kWh)", showgrid=True, gridcolor='lightgray', linecolor='black', mirror=True),
-        shapes=shapes, annotations=annotations
-    )
+    fig.update_layout(template="simple_white", font=dict(family="Times New Roman, serif", size=14, color="black"),
+                      height=900, margin=dict(l=60, r=40, t=40, b=180), hovermode="x unified",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                      xaxis=dict(showgrid=True, gridcolor='lightgray', title=dict(text=x_title, standoff=80),
+                                 range=[x_min, x_max], tickformat=x_format, showticklabels=True, linecolor='black',
+                                 mirror=True),
+                      xaxis2=dict(showgrid=True, gridcolor='lightgray', title=dict(text=x_title, standoff=80),
+                                  range=[x_min, x_max], tickformat=x_format, showticklabels=True, linecolor='black',
+                                  mirror=True),
+                      yaxis=dict(title="Speed (km/h)", showgrid=True, gridcolor='lightgray', linecolor='black',
+                                 mirror=True),
+                      yaxis2=dict(title="Energy (kWh)", showgrid=True, gridcolor='lightgray', linecolor='black',
+                                  mirror=True), shapes=shapes, annotations=annotations)
     return fig
 
 
@@ -397,23 +501,21 @@ st.title("🎲 Monte Carlo Fleet Simulator")
 st.markdown(
     "Dedicated tool for calculating stochastic expected values and rendering representative kinematic profiles.")
 
-# --- 0. FILE LOADER WIDGET ---
+# --- 0. DATA LOAD ---
+with st.spinner("Loading railML data from ZIP..."):
+    df_stations, df_segments = load_railml_from_zip(RAILML_ZIP_PATH)
+
+if df_stations is None or df_stations.empty:
+    st.error("Failed to load or parse railML data. Please ensure the ZIP file exists and contains valid railML.")
+    st.stop()
+
+# Build dropdown lists
+mandatory_stations = df_stations[df_stations["Zastavení"] == "X"][["Dopravní bod", "Poloha"]].values.tolist()
+station_names = df_stations["Dopravní bod"].tolist()
+station_dict = dict(zip(df_stations["Dopravní bod"], df_stations["Poloha"]))
+
 st.sidebar.header("📂 Data Source")
-excel_files = [f for f in glob.glob("*.xlsx") if not f.startswith("~$")]
-if not excel_files:
-    st.sidebar.error("No Excel (.xlsx) files found in the current directory.")
-    st.stop()
-
-selected_track_file = st.sidebar.selectbox("Select Track Profile", excel_files)
-
-# Load stations from the dynamically selected file
-mandatory_stations = load_mandatory_stations(selected_track_file)
-if not mandatory_stations:
-    st.error(f"Could not load stations from {selected_track_file}. Ensure it contains 'X' in the Zastavení column.")
-    st.stop()
-
-station_names = [s[0] for s in mandatory_stations]
-station_dict = {s[0]: s[1] for s in mandatory_stations}
+st.sidebar.success(f"Loaded network from {RAILML_ZIP_PATH}")
 
 # --- 1. TRAIN PARAMETERS ---
 st.sidebar.header("1. Train Parameters")
@@ -445,10 +547,8 @@ else:
     decel = preset["decel"]
     efficiency = preset["efficiency"]
 
-    if traction == "DIESEL":
-        diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0, step=0.1)
-    else:
-        diesel_density = 10.0
+    diesel_density = st.sidebar.number_input("Diesel Energy Density (kWh/L)", value=10.0,
+                                             step=0.1) if traction == "DIESEL" else 10.0
 
 # --- 2. SHIFT & TRIP BUILDER ---
 st.sidebar.header("2. Shift Configuration")
@@ -456,35 +556,31 @@ mc_start = st.sidebar.selectbox("Terminal A", station_names, index=0)
 mc_end = st.sidebar.selectbox("Terminal B", station_names, index=len(station_names) - 1)
 
 trip_pattern = st.sidebar.radio("Trip Pattern", ["Single Direction (A ➔ B)", "Round Trip (A ➔ B ➔ A)"])
-num_cycles = st.sidebar.number_input("Number of Cycles", min_value=1, max_value=20, value=1,
-                                     help="How many times the selected pattern is repeated in a single shift.")
+num_cycles = st.sidebar.number_input("Number of Cycles", min_value=1, max_value=20, value=1)
 
 st.sidebar.header("3. Stochastic Settings")
-mc_runs = st.sidebar.number_input("N (Runs per Probability)", min_value=10, max_value=1000, value=100, step=10,
-                                  help="The 'N' variable for the Monte Carlo loops.")
+mc_runs = st.sidebar.number_input("N (Runs per Probability)", min_value=10, max_value=1000, value=100, step=10)
 mc_dwell = st.sidebar.number_input("Dwell Time (s)", value=30, step=5)
 
 st.sidebar.header("4. Representative Graph")
-st.sidebar.caption("Visualize a single simulated run to view velocity, limits, and energy profiles.")
 plot_dir = st.sidebar.radio("Plot Direction", [f"{mc_start} ➔ {mc_end}", f"{mc_end} ➔ {mc_start}"])
 plot_prob = st.sidebar.slider("Stop Probability for Plot", 0.0, 1.0, 0.4, 0.1)
 plot_x_axis = st.sidebar.radio("Plot X-Axis", ["Distance (km)", "Time (MM:SS)"])
 
 # --- RUN BUTTONS ---
 c_mc, c_plot = st.sidebar.columns(2)
+
 if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
     if mc_start == mc_end:
         st.sidebar.error("Start and End stations cannot be the same!")
         st.stop()
 
-    with st.spinner(f"Running Monte Carlo (N={mc_runs}) using {selected_track_file}..."):
+    with st.spinner(f"Running Monte Carlo (N={mc_runs})..."):
         try:
-            # Set up directional track files to account for asymmetric gradients
             is_fwd_1 = station_dict[mc_start] > station_dict[mc_end]
-            track_1 = TrackProfile(selected_track_file, is_forward_direction=is_fwd_1)
-
+            track_1 = TrackProfile(df_stations, df_segments, is_forward_direction=is_fwd_1)
             is_fwd_2 = station_dict[mc_end] > station_dict[mc_start]
-            track_2 = TrackProfile(selected_track_file, is_forward_direction=is_fwd_2)
+            track_2 = TrackProfile(df_stations, df_segments, is_forward_direction=is_fwd_2)
 
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
@@ -493,12 +589,10 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                 return stats["net_kwh"] / (diesel_density * efficiency) if traction == "DIESEL" else stats["net_kwh"]
 
 
-            # Shift Logic Variables
             n_fwd = num_cycles
             n_rev = num_cycles if trip_pattern == "Round Trip (A ➔ B ➔ A)" else 0
             total_legs = n_fwd + n_rev
 
-            # Deterministic Baselines (Fast, no history tracking)
             _, w_stops_1, w_stats_1 = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end], "all",
                                                          1.0, mc_dwell, record_history=False)
             _, b_stops_1, b_stats_1 = sim.run_simulation(track_1, station_dict[mc_start], station_dict[mc_end], "none",
@@ -513,20 +607,16 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                 w_stops_2, w_stats_2 = [], {"journey_time_s": 0, "net_kwh": 0}
                 b_stops_2, b_stats_2 = [], {"journey_time_s": 0, "net_kwh": 0}
 
-            # Scale baselines
             base_worst_unit = (get_unit(w_stats_1) * n_fwd) + (get_unit(w_stats_2) * n_rev)
             base_best_unit = (get_unit(b_stats_1) * n_fwd) + (get_unit(b_stats_2) * n_rev)
-
             base_worst_time = (w_stats_1["journey_time_s"] * n_fwd) + (w_stats_2["journey_time_s"] * n_rev)
             base_best_time = (b_stats_1["journey_time_s"] * n_fwd) + (b_stats_2["journey_time_s"] * n_rev)
-
             base_worst_stops = (len(w_stops_1) * n_fwd) + (len(w_stops_2) * n_rev)
             base_best_stops = (len(b_stops_1) * n_fwd) + (len(b_stops_2) * n_rev)
 
             mand_per_leg = base_best_stops / total_legs
             req_per_leg = (base_worst_stops - base_best_stops) / total_legs
 
-            # Stochastic Loops (Fast, no history tracking)
             results = []
             for p in [0.8, 0.6, 0.4, 0.2]:
                 t_sum, e_sum, s_sum = 0.0, 0.0, 0.0
@@ -545,50 +635,28 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                         e_sum += get_unit(r_stats)
                         s_sum += len(r_stops)
 
-                results.append({
-                    "Probability": f"{int(p * 100)}%",
-                    "Prob_Num": int(p * 100),
-                    "Avg Stops per Run": round(s_sum / mc_runs, 1),
-                    "Req. Stops Made/Leg": round(((s_sum / mc_runs) - base_best_stops) / total_legs, 2),
-                    "Avg Time": format_time(t_sum / mc_runs),
-                    "Expected Consumed": round(e_sum / mc_runs, 2),
-                    "Expected Savings": round(base_worst_unit - (e_sum / mc_runs), 2),
-                    "Type": "Stochastic"
-                })
+                results.append({"Probability": f"{int(p * 100)}%", "Prob_Num": int(p * 100),
+                                "Avg Stops per Run": round(s_sum / mc_runs, 1),
+                                "Req. Stops Made/Leg": round(((s_sum / mc_runs) - base_best_stops) / total_legs, 2),
+                                "Avg Time": format_time(t_sum / mc_runs),
+                                "Expected Consumed": round(e_sum / mc_runs, 2),
+                                "Expected Savings": round(base_worst_unit - (e_sum / mc_runs), 2),
+                                "Type": "Stochastic"})
 
-            results.insert(0, {
-                "Probability": "100% (Worst Case)",
-                "Prob_Num": 100,
-                "Avg Stops per Run": base_worst_stops,
-                "Req. Stops Made/Leg": round(req_per_leg, 2),
-                "Avg Time": format_time(base_worst_time),
-                "Expected Consumed": round(base_worst_unit, 2),
-                "Expected Savings": 0.0,
-                "Type": "Baseline"
-            })
-            results.append({
-                "Probability": "0% (Best Case)",
-                "Prob_Num": 0,
-                "Avg Stops per Run": base_best_stops,
-                "Req. Stops Made/Leg": 0.0,
-                "Avg Time": format_time(base_best_time),
-                "Expected Consumed": round(base_best_unit, 2),
-                "Expected Savings": round(base_worst_unit - base_best_unit, 2),
-                "Type": "Baseline"
-            })
+            results.insert(0,
+                           {"Probability": "100% (Worst Case)", "Prob_Num": 100, "Avg Stops per Run": base_worst_stops,
+                            "Req. Stops Made/Leg": round(req_per_leg, 2), "Avg Time": format_time(base_worst_time),
+                            "Expected Consumed": round(base_worst_unit, 2), "Expected Savings": 0.0,
+                            "Type": "Baseline"})
+            results.append({"Probability": "0% (Best Case)", "Prob_Num": 0, "Avg Stops per Run": base_best_stops,
+                            "Req. Stops Made/Leg": 0.0, "Avg Time": format_time(base_best_time),
+                            "Expected Consumed": round(base_best_unit, 2),
+                            "Expected Savings": round(base_worst_unit - base_best_unit, 2), "Type": "Baseline"})
 
-            st.session_state.mc_results = {
-                "df": pd.DataFrame(results),
-                "start": mc_start,
-                "end": mc_end,
-                "runs": mc_runs,
-                "unit": "Liters" if traction == "DIESEL" else "kWh",
-                "total_legs": total_legs,
-                "cycles": num_cycles,
-                "pattern": trip_pattern,
-                "mand_per_leg": round(mand_per_leg, 1),
-                "req_per_leg": round(req_per_leg, 1)
-            }
+            st.session_state.mc_results = {"df": pd.DataFrame(results), "start": mc_start, "end": mc_end,
+                                           "runs": mc_runs, "unit": "Liters" if traction == "DIESEL" else "kWh",
+                                           "total_legs": total_legs, "cycles": num_cycles, "pattern": trip_pattern,
+                                           "mand_per_leg": round(mand_per_leg, 1), "req_per_leg": round(req_per_leg, 1)}
         except Exception as e:
             st.error(f"Error during Monte Carlo: {e}")
 
@@ -599,26 +667,20 @@ if c_plot.button("📈 Plot Run", use_container_width=True):
 
     with st.spinner("Generating Representative Run telemetry..."):
         try:
-            # Parse requested direction
             is_primary_dir = plot_dir.startswith(mc_start)
             p_start = station_dict[mc_start] if is_primary_dir else station_dict[mc_end]
             p_end = station_dict[mc_end] if is_primary_dir else station_dict[mc_start]
-
             is_fwd = p_start > p_end
-            track = TrackProfile(selected_track_file, is_forward_direction=is_fwd)
+            track = TrackProfile(df_stations, df_segments, is_forward_direction=is_fwd)
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
-            # Execute exactly one run WITH history recording turned ON
             history, stops_names, stats = sim.run_simulation(track, p_start, p_end, "random", plot_prob, mc_dwell,
                                                              record_history=True)
-
-            st.session_state.rep_results = {
-                "history": history, "stops_names": stops_names, "stats": stats,
-                "start_name": mc_start if is_primary_dir else mc_end,
-                "end_name": mc_end if is_primary_dir else mc_start,
-                "prob": plot_prob, "track": track, "traction": traction,
-                "efficiency": efficiency, "diesel_density": diesel_density
-            }
+            st.session_state.rep_results = {"history": history, "stops_names": stops_names, "stats": stats,
+                                            "start_name": mc_start if is_primary_dir else mc_end,
+                                            "end_name": mc_end if is_primary_dir else mc_start, "prob": plot_prob,
+                                            "track": track, "traction": traction, "efficiency": efficiency,
+                                            "diesel_density": diesel_density}
         except Exception as e:
             st.error(f"Error generating plot: {e}")
 
@@ -637,34 +699,18 @@ with tab_mc:
 
         st.subheader(f"Monte Carlo Expected Values: {mc['start']} ➔ {mc['end']}")
         st.markdown(
-            f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}  \n"
-            f"**Stops Per Leg:** {mc['mand_per_leg']} Mandatory | {mc['req_per_leg']} Request"
-        )
-        st.caption(
-            f"Based on **{mc['runs']}** iterations per probability tier. Data loaded from **{selected_track_file}**.")
-
+            f"**Configuration:** {mc['pattern']} | **Cycles:** {mc['cycles']} | **Total Legs:** {mc['total_legs']}  \n**Stops Per Leg:** {mc['mand_per_leg']} Mandatory | {mc['req_per_leg']} Request")
         display_df = df.drop(columns=["Prob_Num"])
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        # Plotting Expected Values including Baselines
-        fig = px.bar(df, x="Prob_Num", y="Expected Savings",
-                     title=f"Expected Savings vs. Stopping Policy ({unit})",
+        fig = px.bar(df, x="Prob_Num", y="Expected Savings", title=f"Expected Savings vs. Stopping Policy ({unit})",
                      labels={"Expected Savings": f"Savings vs. All Stops ({unit})",
-                             "Prob_Num": "Request Stop Probability (%)"},
-                     color="Expected Savings", color_continuous_scale="Blues",
-                     text="Expected Savings")
-
-        # Make columns a bit wider
+                             "Prob_Num": "Request Stop Probability (%)"}, color="Expected Savings",
+                     color_continuous_scale="Blues", text="Expected Savings")
         fig.update_traces(width=10, texttemplate='%{text:.2f}', textposition='outside')
-
-        # Scale y-axis slightly to ensure the outside text is not clipped by the top border
         max_y = df["Expected Savings"].max()
-        fig.update_layout(
-            showlegend=False,
-            xaxis=dict(range=[-10, 110], tickvals=[0, 20, 40, 60, 80, 100]),
-            yaxis_range=[0, max_y * 1.15] if max_y > 0 else [0, 1]
-        )
-
+        fig.update_layout(showlegend=False, xaxis=dict(range=[-10, 110], tickvals=[0, 20, 40, 60, 80, 100]),
+                          yaxis_range=[0, max_y * 1.15] if max_y > 0 else [0, 1])
         st.plotly_chart(fig, use_container_width=True)
 
 with tab_plot:
@@ -672,7 +718,6 @@ with tab_plot:
         st.info("👈 **Configure parameters in Section 4 of the sidebar, then click 'Plot Run'.**")
     else:
         rep = st.session_state.rep_results
-
         st.subheader(f"Representative Run: {rep['start_name']} ➔ {rep['end_name']} (P = {int(rep['prob'] * 100)}%)")
 
         m, s = int(rep["stats"]["journey_time_s"] // 60), int(rep["stats"]["journey_time_s"] % 60)
@@ -688,25 +733,6 @@ with tab_plot:
 
         fig = create_plotly_figure(rep["history"], rep["stops_names"], rep["track"].stations,
                                    rep["traction"] == "ELECTRIC", plot_x_axis)
-
-        # Override Streamlit's theme to force the white academic background to show
         st.plotly_chart(fig, use_container_width=True, theme=None)
-
         st.caption(
             f"**Stops Made during this specific run:** {', '.join(rep['stops_names']) if rep['stops_names'] else 'None'}")
-
-        st.markdown("---")
-        st.subheader("📥 Export")
-        st.write(
-            "You can use the built-in camera icon in the top right of the graph to download a PNG. Alternatively, download the raw telemetry data below to plot the graph natively in LaTeX (using `pgfplots`) or Excel.")
-
-        csv_df = pd.DataFrame(rep["history"])
-        csv_data = csv_df.to_csv(index=False).encode('utf-8')
-
-        st.download_button(
-            label="Download Telemetry Data (CSV)",
-            data=csv_data,
-            file_name=f"kinematic_profile_P{int(rep['prob'] * 100)}.csv",
-            mime="text/csv",
-            help="Download the raw second-by-second physics data to create high-resolution plots in LaTeX."
-        )
