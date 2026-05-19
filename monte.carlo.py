@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import xml.etree.ElementTree as ET
 
 # ==========================================
 #  PRE-DEFINED VEHICLE FLEET
@@ -51,42 +52,81 @@ if "rep_results" not in st.session_state:
 
 
 # ==========================================
-#  DATA LOADER FOR UI DROPDOWNS
+#  DATA LOADERS & PARSERS
 # ==========================================
+
 @st.cache_data
-def load_mandatory_stations(filepath):
+def parse_railml_to_dataframe(filepath, track_id=None):
+    """
+    Parses a railML (XML) file and flattens it into the standard DataFrame format
+    expected by the TrainSimulator engine.
+    """
     try:
-        df = pd.read_excel(filepath)
-        df.columns = df.columns.str.strip()
-        df["Zastavení"] = df["Zastavení"].fillna("")
-        df["Poloha"] = pd.to_numeric(df["Poloha"], errors="coerce")
-        df = df.dropna(subset=["Poloha"])
-        df["Poloha"] = df["Poloha"].apply(lambda x: x / 1000.0 if x > 1000 else x)
+        tree = ET.parse(filepath)
+        root = tree.getroot()
 
-        stations = []
-        for _, row in df.iterrows():
-            if str(row["Zastavení"]).strip().upper() == "X":
-                name = str(row.get("Dopravní bod", "")).strip()
-                if name and name != "nan":
-                    stations.append((name, row["Poloha"]))
+        # Strip namespaces for easier parsing across different railML versions (2.x vs 3.x)
+        for elem in root.iter():
+            if '}' in elem.tag:
+                elem.tag = elem.tag.split('}', 1)[1]
 
-        return sorted(stations, key=lambda x: x[1], reverse=True)
-    except Exception:
-        return []
+        events = []
+
+        # If dealing with a national infrastructure file, you must filter by track/line ID.
+        # This basic parser looks for infrastructure elements.
+
+        # 1. Extract Stations / Operational Control Points (ocp)
+        for ocp in root.iter('ocp'):
+            name = ocp.get('name', '')
+            pos = ocp.get('pos')
+            if name and pos:
+                # Defaulting to "X" (Mandatory) for standard stations, could be enhanced to detect "R"
+                events.append(
+                    {"Poloha": float(pos), "Dopravní bod": name, "Zastavení": "X", "Rychlost": np.nan, "Sklon": np.nan})
+
+        # 2. Extract Speed Limits (speedChange)
+        for speed in root.iter('speedChange'):
+            pos = speed.get('pos')
+            v = speed.get('v')
+            if pos and v:
+                events.append(
+                    {"Poloha": float(pos), "Dopravní bod": "", "Zastavení": "", "Rychlost": float(v), "Sklon": np.nan})
+
+        # 3. Extract Gradients (gradientChange)
+        for grad in root.iter('gradientChange'):
+            pos = grad.get('pos')
+            slope = grad.get('slope')  # railML slope is usually in promile
+            if pos and slope:
+                events.append({"Poloha": float(pos), "Dopravní bod": "", "Zastavení": "", "Rychlost": np.nan,
+                               "Sklon": float(slope)})
+
+        if not events:
+            return pd.DataFrame()
+
+        # Convert to DataFrame, sort by position, and forward-fill physical properties
+        df = pd.DataFrame(events)
+        df = df.sort_values(by="Poloha").reset_index(drop=True)
+
+        # Merge events occurring at the exact same position
+        df = df.groupby("Poloha", as_index=False).first()
+
+        # Forward fill the speed and gradient so every point knows the current track state
+        df["Rychlost"] = df["Rychlost"].ffill().bfill()
+        df["Sklon"] = df["Sklon"].ffill().bfill().fillna(0.0)
+
+        return df
+
+    except Exception as e:
+        st.error(f"Failed to parse railML file: {e}")
+        return pd.DataFrame()
 
 
-# ==========================================
-#  CORE CLASSES
-# ==========================================
-class TrackProfile:
-    def __init__(self, excel_filepath: str, is_forward_direction: bool):
-        self.is_forward = is_forward_direction
-        self.df_raw = self._load_from_excel(excel_filepath)
-        self.segments = self._build_segments()
-        self.stations = self._extract_stations()
-        self.station_dict = {s["name"]: s["km"] for s in self.stations}
-
-    def _load_from_excel(self, filepath: str) -> pd.DataFrame:
+@st.cache_data
+def get_unified_dataframe(filepath, track_id=None):
+    """Router function to handle both Excel and railML formats, returning a unified DataFrame."""
+    if filepath.lower().endswith(('.xml', '.railml')):
+        return parse_railml_to_dataframe(filepath, track_id)
+    else:
         df = pd.read_excel(filepath)
         df.columns = df.columns.str.strip()
         df["Zastavení"] = df["Zastavení"].fillna("")
@@ -94,7 +134,38 @@ class TrackProfile:
         df["Rychlost"] = pd.to_numeric(df["Rychlost"], errors="coerce")
         df["Sklon"] = pd.to_numeric(df["Sklon"], errors="coerce")
         df = df.dropna(subset=["Poloha"])
-        df["Poloha"] = df["Poloha"].apply(lambda x: x / 1000.0 if x > 1000 else x)
+        df["Poloha"] = df["Poloha"].apply(lambda x: x / 1000.0 if x > 1000 else x)  # Convert meters to km if necessary
+        return df
+
+
+@st.cache_data
+def load_mandatory_stations(filepath, track_id=None):
+    df = get_unified_dataframe(filepath, track_id)
+    if df.empty:
+        return []
+
+    stations = []
+    for _, row in df.iterrows():
+        if str(row["Zastavení"]).strip().upper() == "X":
+            name = str(row.get("Dopravní bod", "")).strip()
+            if name and name != "nan":
+                stations.append((name, row["Poloha"]))
+
+    return sorted(stations, key=lambda x: x[1], reverse=True)
+
+
+# ==========================================
+#  CORE CLASSES
+# ==========================================
+class TrackProfile:
+    def __init__(self, df_raw: pd.DataFrame, is_forward_direction: bool):
+        self.is_forward = is_forward_direction
+        self.df_raw = self._clean_dataframe(df_raw)
+        self.segments = self._build_segments()
+        self.stations = self._extract_stations()
+        self.station_dict = {s["name"]: s["km"] for s in self.stations}
+
+    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values(by="Poloha", ascending=False).reset_index(drop=True)
         df["Rychlost"] = df["Rychlost"].ffill().bfill()
         df["Sklon"] = df["Sklon"].ffill().bfill().fillna(0)
@@ -212,7 +283,6 @@ class TrainSimulator:
 
             mech_power, regen_power = 0.0, 0.0
 
-            # Record telemetry if requested
             if record_history:
                 track_limit_front_m_s, _ = track.get_effective_limit_and_grad(current_km, current_km)
                 history["time_s"].append(journey_time_s)
@@ -399,17 +469,29 @@ st.markdown(
 
 # --- 0. FILE LOADER WIDGET ---
 st.sidebar.header("📂 Data Source")
-excel_files = [f for f in glob.glob("*.xlsx") if not f.startswith("~$")]
-if not excel_files:
-    st.sidebar.error("No Excel (.xlsx) files found in the current directory.")
+excel_files = [f for f in glob.glob("*.xlsx")]
+xml_files = [f for f in glob.glob("*.xml")] + [f for f in glob.glob("*.railml")]
+all_files = [f for f in excel_files + xml_files if not f.startswith("~$")]
+
+if not all_files:
+    st.sidebar.error("No Excel (.xlsx) or railML (.xml/.railml) files found in the current directory.")
     st.stop()
 
-selected_track_file = st.sidebar.selectbox("Select Track Profile", excel_files)
+selected_track_file = st.sidebar.selectbox("Select Track Profile", all_files)
+
+# If it's a railML file, we need a Track/Line ID filter because national infrastructures are massive
+selected_track_id = None
+if selected_track_file.lower().endswith(('.xml', '.railml')):
+    st.sidebar.info("railML file detected. Extracting routes...")
+    # In a full production app, you would parse the XML here to find all `<line>` IDs and populate a dropdown.
+    # For now, we provide a text input so the user can isolate the specific path.
+    selected_track_id = st.sidebar.text_input("Enter Line ID / Track ID (Optional)",
+                                              help="Filters the massive railML graph to a specific route.")
 
 # Load stations from the dynamically selected file
-mandatory_stations = load_mandatory_stations(selected_track_file)
+mandatory_stations = load_mandatory_stations(selected_track_file, selected_track_id)
 if not mandatory_stations:
-    st.error(f"Could not load stations from {selected_track_file}. Ensure it contains 'X' in the Zastavení column.")
+    st.error(f"Could not load stations from {selected_track_file}. Ensure the format is supported.")
     st.stop()
 
 station_names = [s[0] for s in mandatory_stations]
@@ -479,12 +561,15 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
 
     with st.spinner(f"Running Monte Carlo (N={mc_runs}) using {selected_track_file}..."):
         try:
+            # Setup track DataFrames unified from Excel or XML
+            base_df = get_unified_dataframe(selected_track_file, selected_track_id)
+
             # Set up directional track files to account for asymmetric gradients
             is_fwd_1 = station_dict[mc_start] > station_dict[mc_end]
-            track_1 = TrackProfile(selected_track_file, is_forward_direction=is_fwd_1)
+            track_1 = TrackProfile(base_df, is_forward_direction=is_fwd_1)
 
             is_fwd_2 = station_dict[mc_end] > station_dict[mc_start]
-            track_2 = TrackProfile(selected_track_file, is_forward_direction=is_fwd_2)
+            track_2 = TrackProfile(base_df, is_forward_direction=is_fwd_2)
 
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
@@ -605,7 +690,8 @@ if c_plot.button("📈 Plot Run", use_container_width=True):
             p_end = station_dict[mc_end] if is_primary_dir else station_dict[mc_start]
 
             is_fwd = p_start > p_end
-            track = TrackProfile(selected_track_file, is_forward_direction=is_fwd)
+            base_df = get_unified_dataframe(selected_track_file, selected_track_id)
+            track = TrackProfile(base_df, is_forward_direction=is_fwd)
             sim = TrainSimulator(mass, length, power, aux_power, accel, decel, traction, efficiency)
 
             # Execute exactly one run WITH history recording turned ON
