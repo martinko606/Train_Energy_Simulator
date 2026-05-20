@@ -10,6 +10,9 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import heapq
 import re
+import itertools
+
+from app import format_time
 
 # ==========================================
 #  PRE-DEFINED VEHICLE FLEET
@@ -181,13 +184,16 @@ def parse_railml_timetable(filepath):
         return graph
 
 
-def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, departure_time_str: str):
+def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, departure_time: str):
     """
     Executes a Dijkstra Shortest Path search honoring railML connection constraints and time weights.
     """
-    start_time = parse_time_to_seconds(departure_time_str)
+    # Using itertools.count() to ensure heapq never fails on dictionary comparison ties
+    tiebreaker = itertools.count()
+
+    start_time = parse_time_to_seconds(departure_time)
     if start_time is None:
-        raise ValueError("Invalid departure time format.")
+        raise ValueError("Invalid departure time format. Please use HH:MM or HH:MM:SS.")
 
     start_id = graph.ocp_name_to_id.get(start_ocp, start_ocp)
     end_id = graph.ocp_name_to_id.get(end_ocp, end_ocp)
@@ -195,15 +201,15 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
     if start_id not in graph.edges:
         return None
 
-    # Priority Queue State: (current_time, current_ocp_id, current_trainPart, path)
+    # Priority Queue State: (current_time, tiebreaker, current_ocp_id, current_trainPart, path)
     pq = []
-    heapq.heappush(pq, (start_time, start_id, None, []))
+    heapq.heappush(pq, (start_time, next(tiebreaker), start_id, None, []))
 
     # Pruning dictionary based on (station, train_part) state
     visited = {}
 
     while pq:
-        current_time, current_ocp, current_tp, path = heapq.heappop(pq)
+        current_time, _, current_ocp, current_tp, path = heapq.heappop(pq)
 
         # Path Found
         if current_ocp == end_id:
@@ -233,13 +239,13 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
         # Explore outgoing edges
         for edge in graph.edges[current_ocp]:
             next_tp = edge["trainPart"]
-            actual_dep_time = edge["dep"]
-            actual_arr_time = edge["arr"]
+            edge_dep = edge["dep"]
+            edge_arr = edge["arr"]
 
             # Apply Next-Day Wrap around if train departed earlier today
-            if actual_dep_time < current_time:
-                actual_dep_time += 24 * 3600
-                actual_arr_time += 24 * 3600
+            while edge_dep < current_time:
+                edge_dep += 24 * 3600
+                edge_arr += 24 * 3600
 
             # Handle Transfer Logic & Constraints
             if current_tp is not None and current_tp != next_tp:
@@ -256,16 +262,16 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
                             min_transfer = conn["min_time"]
                             break
                 else:
-                    # Implicit transfer allowed if no strict rule prohibits it (assuming 0 delay baseline)
+                    # Implicit transfer allowed if no strict rule prohibits it
                     min_transfer = 0
 
                 if not allowed:
                     continue
 
                 # Recalculate Next-Day Wrap if transfer time causes us to miss the connection
-                if current_time + min_transfer > actual_dep_time:
-                    actual_dep_time += 24 * 3600
-                    actual_arr_time += 24 * 3600
+                while current_time + min_transfer > edge_dep:
+                    edge_dep += 24 * 3600
+                    edge_arr += 24 * 3600
 
             # Queue Next State
             next_path = list(path)
@@ -273,11 +279,11 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
                 "from": current_ocp,
                 "to": edge["to"],
                 "trainPart": next_tp,
-                "dep": actual_dep_time,
-                "arr": actual_arr_time
+                "dep": edge_dep,
+                "arr": edge_arr
             })
 
-            heapq.heappush(pq, (actual_arr_time, edge["to"], next_tp, next_path))
+            heapq.heappush(pq, (edge_arr, next(tiebreaker), edge["to"], next_tp, next_path))
 
     return None
 
@@ -318,6 +324,21 @@ def parse_railml_to_dataframe(filepath, track_id=None):
             if pos and slope:
                 events.append({"Poloha": float(pos), "Dopravní bod": "", "Zastavení": "", "Rychlost": np.nan,
                                "Sklon": float(slope)})
+
+        # Fallback for railML 3.2 Infrastructure structures
+        if not events:
+            for lps in root.iter('linearPositioningSystem'):
+                name_elem = lps.find('name')
+                name = name_elem.get('name') if name_elem is not None else lps.get('id')
+                start_meas = lps.get('startMeasure')
+                end_meas = lps.get('endMeasure')
+                if name and start_meas and end_meas:
+                    events.append(
+                        {"Poloha": float(start_meas) / 1000.0, "Dopravní bod": name, "Zastavení": "X", "Rychlost": 80.0,
+                         "Sklon": 0.0})
+                    events.append(
+                        {"Poloha": float(end_meas) / 1000.0, "Dopravní bod": name + " (End)", "Zastavení": "X",
+                         "Rychlost": 80.0, "Sklon": 0.0})
 
         if not events:
             return pd.DataFrame()
@@ -826,7 +847,8 @@ with tab_journey:
             with st.spinner("Parsing RailML Timetable constraints and searching..."):
                 t_graph = parse_railml_timetable(selected_track_file)
                 if not t_graph.edges:
-                    st.error("No valid Timetable routing edges found in this railML file.")
+                    st.error(
+                        "No valid Timetable routing edges found in this railML file. (Note: RailML 3.x infrastructure-only files do not contain <trainPart> timetables.)")
                 else:
                     journey = find_journey_dijkstra(t_graph, j_start, j_end, j_time)
                     if journey:
