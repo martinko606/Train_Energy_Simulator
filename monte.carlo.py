@@ -133,12 +133,10 @@ def parse_railml_timetable(filepath):
         tree = ET.parse(filepath)
         root = tree.getroot()
 
-        # Strip namespaces dynamically
         for elem in root.iter():
             if '}' in elem.tag:
                 elem.tag = elem.tag.split('}', 1)[1]
 
-        # 1. Map OCPs (Stations) to ID
         for ocp in root.iter('ocp'):
             ocp_id = ocp.get('id')
             ocp_name = ocp.get('name', ocp_id)
@@ -146,7 +144,6 @@ def parse_railml_timetable(filepath):
                 graph.ocp_id_to_name[ocp_id] = ocp_name
                 graph.ocp_name_to_id[ocp_name] = ocp_id
 
-        # 2. Parse trainParts & Connection rules
         for tp in root.iter('trainPart'):
             tp_id = tp.get('id')
             ocp_tts = list(tp.findall('.//ocpTT'))
@@ -166,12 +163,10 @@ def parse_railml_timetable(filepath):
                     arr_sec = parse_time_to_seconds(times_B.get('arrival'))
 
                     if dep_sec is not None and arr_sec is not None:
-                        # Handle overnight transit for this specific edge
                         if arr_sec < dep_sec:
                             arr_sec += 24 * 3600
                         graph.add_edge(ocp_A, ocp_B, tp_id, dep_sec, arr_sec)
 
-                # Parse connections at current_ocp
                 for conn in current_ocp.findall('.//connection'):
                     to_tp = conn.get('trainPartRef') or conn.get('trainRef')
                     min_time = parse_duration_to_seconds(conn.get('minConnTime'))
@@ -188,9 +183,7 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
     """
     Executes a Dijkstra Shortest Path search honoring railML connection constraints and time weights.
     """
-    # Using itertools.count() to ensure heapq never fails on dictionary comparison ties
     tiebreaker = itertools.count()
-
     start_time = parse_time_to_seconds(departure_time)
     if start_time is None:
         raise ValueError("Invalid departure time format. Please use HH:MM or HH:MM:SS.")
@@ -201,17 +194,13 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
     if start_id not in graph.edges:
         return None
 
-    # Priority Queue State: (current_time, tiebreaker, current_ocp_id, current_trainPart, path)
     pq = []
     heapq.heappush(pq, (start_time, next(tiebreaker), start_id, None, []))
-
-    # Pruning dictionary based on (station, train_part) state
     visited = {}
 
     while pq:
         current_time, _, current_ocp, current_tp, path = heapq.heappop(pq)
 
-        # Path Found
         if current_ocp == end_id:
             total_duration = current_time - start_time
             formatted_path = []
@@ -236,24 +225,20 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
         if current_ocp not in graph.edges:
             continue
 
-        # Explore outgoing edges
         for edge in graph.edges[current_ocp]:
             next_tp = edge["trainPart"]
             edge_dep = edge["dep"]
             edge_arr = edge["arr"]
 
-            # Apply Next-Day Wrap around if train departed earlier today
             while edge_dep < current_time:
                 edge_dep += 24 * 3600
                 edge_arr += 24 * 3600
 
-            # Handle Transfer Logic & Constraints
             if current_tp is not None and current_tp != next_tp:
                 allowed = True
                 min_transfer = 0
-
-                # Enforce explicit rules if defined for this train/OCP
                 conn_key = (current_ocp, current_tp)
+
                 if conn_key in graph.connections:
                     allowed = False
                     for conn in graph.connections[conn_key]:
@@ -262,18 +247,15 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
                             min_transfer = conn["min_time"]
                             break
                 else:
-                    # Implicit transfer allowed if no strict rule prohibits it
                     min_transfer = 0
 
                 if not allowed:
                     continue
 
-                # Recalculate Next-Day Wrap if transfer time causes us to miss the connection
                 while current_time + min_transfer > edge_dep:
                     edge_dep += 24 * 3600
                     edge_arr += 24 * 3600
 
-            # Queue Next State
             next_path = list(path)
             next_path.append({
                 "from": current_ocp,
@@ -293,6 +275,28 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
 # ==========================================
 
 @st.cache_data
+def extract_railml_lines(filepath):
+    """Sweeps a massive railML file to find all available Infrastructure lines for dropdown selection."""
+    try:
+        tree = ET.parse(filepath)
+        root = tree.getroot()
+        for elem in root.iter():
+            if '}' in elem.tag:
+                elem.tag = elem.tag.split('}', 1)[1]
+
+        lines = []
+        for lps in root.iter('linearPositioningSystem'):
+            name_elem = lps.find('name')
+            name = name_elem.get('name') if name_elem is not None else "Unknown Line"
+            l_id = lps.get('id', '')
+            if l_id:
+                lines.append(f"{name} ({l_id})")
+        return sorted(list(set(lines)))
+    except Exception:
+        return []
+
+
+@st.cache_data
 def parse_railml_to_dataframe(filepath, track_id=None):
     try:
         tree = ET.parse(filepath)
@@ -304,6 +308,7 @@ def parse_railml_to_dataframe(filepath, track_id=None):
 
         events = []
 
+        # 1. Standard railML 2.x mapping
         for ocp in root.iter('ocp'):
             name = ocp.get('name', '')
             pos = ocp.get('pos')
@@ -325,28 +330,56 @@ def parse_railml_to_dataframe(filepath, track_id=None):
                 events.append({"Poloha": float(pos), "Dopravní bod": "", "Zastavení": "", "Rychlost": np.nan,
                                "Sklon": float(slope)})
 
-        # Fallback for railML 3.2 Infrastructure structures
-        if not events:
-            for lps in root.iter('linearPositioningSystem'):
+        # 2. railML 3.x Infrastructure Mapping (Fallback)
+        lps_elements = list(root.iter('linearPositioningSystem'))
+        if lps_elements:
+            for lps in lps_elements:
+                lps_id = lps.get('id', '')
+
+                # Crucial step: filter by track ID to prevent squashing the whole country into 1D
+                if track_id and track_id != lps_id:
+                    continue
+
                 name_elem = lps.find('name')
-                name = name_elem.get('name') if name_elem is not None else lps.get('id')
+                name = name_elem.get('name') if name_elem is not None else lps_id
                 start_meas = lps.get('startMeasure')
                 end_meas = lps.get('endMeasure')
-                if name and start_meas and end_meas:
+
+                if start_meas is not None:
                     events.append(
-                        {"Poloha": float(start_meas) / 1000.0, "Dopravní bod": name, "Zastavení": "X", "Rychlost": 80.0,
-                         "Sklon": 0.0})
+                        {"Poloha": float(start_meas) / 1000.0, "Dopravní bod": f"{name} (Start)", "Zastavení": "X",
+                         "Rychlost": np.nan, "Sklon": np.nan})
+                if end_meas is not None:
                     events.append(
-                        {"Poloha": float(end_meas) / 1000.0, "Dopravní bod": name + " (End)", "Zastavení": "X",
-                         "Rychlost": 80.0, "Sklon": 0.0})
+                        {"Poloha": float(end_meas) / 1000.0, "Dopravní bod": f"{name} (End)", "Zastavení": "X",
+                         "Rychlost": np.nan, "Sklon": np.nan})
+
+            # Sweep for all intermediate physical points mapped to this exact line to give the Monte Carlo simulator some request stops
+            if track_id:
+                for tag in ['linearCoordinate', 'linearCoordinateBegin', 'linearCoordinateEnd']:
+                    for loc in root.iter(tag):
+                        if loc.get('positioningSystemRef') == track_id:
+                            meas = loc.get('measure')
+                            if meas is not None:
+                                events.append({
+                                    "Poloha": float(meas) / 1000.0,
+                                    "Dopravní bod": f"WP {meas}",
+                                    "Zastavení": "R",  # Mark intermediate points as Request Stops
+                                    "Rychlost": np.nan,
+                                    "Sklon": np.nan
+                                })
 
         if not events:
             return pd.DataFrame()
 
         df = pd.DataFrame(events)
-        df = df.sort_values(by="Poloha").reset_index(drop=True)
+
+        # Sort by Position ASC, and Stop Type DESC so "X" takes priority over "R" over "" if they share the exact same Poloha
+        df = df.sort_values(by=["Poloha", "Zastavení"], ascending=[True, False]).reset_index(drop=True)
         df = df.groupby("Poloha", as_index=False).first()
-        df["Rychlost"] = df["Rychlost"].ffill().bfill()
+
+        # Default missing physical parameters
+        df["Rychlost"] = df["Rychlost"].ffill().bfill().fillna(80.0)
         df["Sklon"] = df["Sklon"].ffill().bfill().fillna(0.0)
 
         return df
@@ -608,13 +641,19 @@ selected_track_file = st.sidebar.selectbox("Select Track Profile", all_files)
 
 selected_track_id = None
 if selected_track_file.lower().endswith(('.xml', '.railml')):
-    selected_track_id = st.sidebar.text_input("Enter Line ID / Track ID (Optional)",
-                                              help="Filters the massive railML graph to a specific route.")
+    st.sidebar.info("railML 3.x Infrastructure detected. Extracting lines...")
+    available_lines = extract_railml_lines(selected_track_file)
+    if available_lines:
+        sel_line = st.sidebar.selectbox("Select Line Reference", available_lines)
+        selected_track_id = sel_line.split('(')[-1].strip(')')
+    else:
+        selected_track_id = st.sidebar.text_input("Enter Line ID / Track ID (Optional)",
+                                                  help="Filters the massive railML graph to a specific route.")
 
 # Load stations from the dynamically selected file
 mandatory_stations = load_mandatory_stations(selected_track_file, selected_track_id)
 if not mandatory_stations:
-    st.error(f"Could not load stations from {selected_track_file}. Ensure the format is supported.")
+    st.error(f"Could not load stations from {selected_track_file}. Please ensure you have selected a valid Line ID.")
     st.stop()
 
 station_names = [s[0] for s in mandatory_stations]
