@@ -12,8 +12,6 @@ import heapq
 import re
 import itertools
 
-from app import format_time
-
 # ==========================================
 #  PRE-DEFINED VEHICLE FLEET
 # ==========================================
@@ -85,14 +83,16 @@ def parse_duration_to_seconds(d_str):
     return 0
 
 
-def format_seconds_to_time(sec, is_duration=False):
+def format_time(sec, is_duration=False):
     if sec is None: return ""
     sec = int(sec)
     h = sec // 3600
     m = (sec % 3600) // 60
     s = sec % 60
     if is_duration:
-        return f"{h:02d}:{m:02d}:{s:02d}"
+        if h > 0:
+            return f"{h:02d}h {m:02d}m {s:02d}s"
+        return f"{m:02d}m {s:02d}s"
     else:
         h = h % 24
         return f"{h:02d}:{m:02d}:{s:02d}"
@@ -220,11 +220,11 @@ def find_journey_dijkstra(graph: TimetableGraph, start_ocp: str, end_ocp: str, d
                     "from": graph.ocp_id_to_name.get(step["from"], step["from"]),
                     "to": graph.ocp_id_to_name.get(step["to"], step["to"]),
                     "trainPart": step["trainPart"],
-                    "dep": format_seconds_to_time(step["dep"]),
-                    "arr": format_seconds_to_time(step["arr"])
+                    "dep": format_time(step["dep"]),
+                    "arr": format_time(step["arr"])
                 })
             return {
-                "total_time": format_seconds_to_time(total_duration, is_duration=True),
+                "total_time": format_time(total_duration, is_duration=True),
                 "path": formatted_path
             }
 
@@ -734,7 +734,7 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
                     "Prob_Num": int(p * 100),
                     "Avg Stops per Run": round(s_sum / mc_runs, 1),
                     "Req. Stops Made/Leg": round(((s_sum / mc_runs) - base_best_stops) / total_legs, 2),
-                    "Avg Time": format_time(t_sum / mc_runs),
+                    "Avg Time": format_time(t_sum / mc_runs, is_duration=True),
                     "Expected Consumed": round(e_sum / mc_runs, 2),
                     "Expected Savings": round(base_worst_unit - (e_sum / mc_runs), 2),
                     "Type": "Stochastic"
@@ -743,13 +743,13 @@ if c_mc.button("🎲 Run MC", type="primary", use_container_width=True):
             results.insert(0, {
                 "Probability": "100% (Worst Case)", "Prob_Num": 100,
                 "Avg Stops per Run": base_worst_stops, "Req. Stops Made/Leg": round(req_per_leg, 2),
-                "Avg Time": format_time(base_worst_time),
+                "Avg Time": format_time(base_worst_time, is_duration=True),
                 "Expected Consumed": round(base_worst_unit, 2), "Expected Savings": 0.0, "Type": "Baseline"
             })
             results.append({
                 "Probability": "0% (Best Case)", "Prob_Num": 0,
                 "Avg Stops per Run": base_best_stops, "Req. Stops Made/Leg": 0.0,
-                "Avg Time": format_time(base_best_time),
+                "Avg Time": format_time(base_best_time, is_duration=True),
                 "Expected Consumed": round(base_best_unit, 2),
                 "Expected Savings": round(base_worst_unit - base_best_unit, 2),
                 "Type": "Baseline"
