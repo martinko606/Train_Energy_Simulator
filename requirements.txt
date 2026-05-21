@@ -1,34 +1,9 @@
-# ──────────────────────────────────────────────────────────────
-# Monte Carlo Fleet Simulator — Python dependencies
-# Install:  pip install -r requirements.txt
-# Python:   3.10 / 3.11 / 3.12  (recommended: 3.11+)
-# ──────────────────────────────────────────────────────────────
+# DYPOD Track Profile Builder & Fleet Energy Simulator
+# Install: pip install -r requirements.txt
+# Python:  3.10 / 3.11 / 3.12
 
-# --- Core scientific stack ---
-numpy>=1.26,<3          # numerical arrays · np.mean / np.std
-pandas>=2.1,<4          # DataFrames for track profiles and result tables
-openpyxl>=3.1           # pandas Excel (.xlsx) back-end for track profiles
-
-# --- Visualisation ---
-plotly>=5.18            # interactive charts (px.bar, go.Scatter, make_subplots)
-
-# --- Web dashboard ---
-streamlit>=1.35         # UI framework · session state · @st.cache_resource / @st.cache_data
-
-# --- Standard-library modules (no install needed) ---
-# glob, heapq, itertools, math, random, re, xml.etree.ElementTree
-# All ship with every CPython 3.x distribution.
-
-# ──────────────────────────────────────────────────────────────
-# Quick-start
-# ──────────────────────────────────────────────────────────────
-# 1. (Recommended) Create a virtual environment first:
-#      python -m venv .venv
-#      source .venv/bin/activate        # Windows: .venv\Scripts\activate
-#
-# 2. Install dependencies:
-#      pip install -r requirements.txt
-#
-# 3. Run the app:
-#      cd /path/to/your/railml/folder
-#      streamlit run monte_carlo_fleet_simulator.py
+numpy>=1.26,<3
+pandas>=2.1,<4
+plotly>=5.18
+streamlit>=1.35
+openpyxl>=3.1        # optional: only needed if you also load .xlsx track files
