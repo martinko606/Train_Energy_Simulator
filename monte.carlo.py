@@ -1213,6 +1213,7 @@ with tab_mc_t:
         legend=dict(orientation="h",yanchor="bottom",y=1.02))
     st.plotly_chart(fig_t,use_container_width=True)
 
+
     with st.expander("📊 Energy–time trade-off"):
         fig_et=go.Figure(go.Scatter(
             x=mc_df["mean_t"]/60,y=mc_df["mean_e"],mode="markers+text",
