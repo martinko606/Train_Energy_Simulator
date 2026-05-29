@@ -852,10 +852,12 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1, gridcolor=C["light"], range=[spd_lo, spd_hi])
     fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     fig.update_yaxes(showticklabels=False, row=3, col=1, range=[0, 1.1])
+
+    # Adjusted Height, Margin, and Legend position to fix subtitle overlap issues
     fig.update_layout(
-        height=760, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
-        margin=dict(t=70, b=10, l=60, r=20),
+        height=800, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0, bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
+        margin=dict(t=100, b=10, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
         hovermode="x unified",
     )
@@ -964,7 +966,7 @@ st.markdown("""<style>
 [data-testid="stSidebar"]{background:#F1F5F9}
 .stButton>button{border-radius:8px;font-weight:600;transition:all .15s}
 .stButton>button:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.15)}
-.block-container{padding-top:1.5rem}
+.block-container{padding-top:2.5rem}
 .stTabs [data-baseweb="tab"]{font-weight:600;font-size:.92rem}
 h3{color:#1E3A5F;font-size:1.2rem}
 .sec{font-size:.92rem;font-weight:700;color:#1E3A5F;
@@ -1291,8 +1293,8 @@ with tab_prof:
                 barmode="overlay", height=260,
                 xaxis_title="Gradient [‰]", yaxis_title="Segments",
                 paper_bgcolor="white", plot_bgcolor="white",
-                legend=dict(orientation="h"),
-                margin=dict(t=10, b=40, l=50, r=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                margin=dict(t=30, b=40, l=50, r=10),
             )
             st.plotly_chart(fig_gh, use_container_width=True)
         with gc2:
@@ -1309,7 +1311,6 @@ with tab_prof:
         stop_icons = spd_df["stop_type"].map({"X": "🚉", "R": "🛑"}).fillna("")
         labels = stop_icons + " " + spd_df["station_name"].str.strip()
 
-        # Fixed logic: Avoid dynamic alpha colors that crash Plotly Tables
         fig_tbl = go.Figure(go.Table(
             columnwidth=[60, 200, 80, 70, 160, 70],
             header=dict(
@@ -1332,7 +1333,7 @@ with tab_prof:
                     ["#F8FAFC"] * len(spd_df),
                     [_spd_cell_color(v) for v in spd_df["speed_kmh"]],
                     ["#F8FAFC"] * len(spd_df),
-                    ["#F8FAFC"] * len(spd_df), # Avoided dynamic text coloring
+                    ["#F8FAFC"] * len(spd_df),
                     ["#F8FAFC"] * len(spd_df),
                 ],
                 font=dict(size=11), align="left", height=24,
@@ -1521,11 +1522,13 @@ with tab_run_t:
                           gridcolor=C["light"])
         fig3.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, gridcolor=C["light"])
         fig3.update_yaxes(title_text="Energy [kWh]",  row=2, col=1, gridcolor=C["light"])
+
+        # Adjusted Height, Margin, and Legend position to fix subtitle overlap issues
         fig3.update_layout(
-            height=580, paper_bgcolor="white", plot_bgcolor="white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+            height=620, paper_bgcolor="white", plot_bgcolor="white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0,
                         bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
-            margin=dict(t=70, b=10, l=60, r=20),
+            margin=dict(t=100, b=10, l=60, r=20),
             font=dict(family="Inter, sans-serif", size=12),
         )
         st.plotly_chart(fig3, use_container_width=True)
