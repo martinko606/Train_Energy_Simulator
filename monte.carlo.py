@@ -370,16 +370,16 @@ class DYPODParser:
     # ── Profile builder ────────────────────────────────────────────────────────
     def build_profile(self, start_op: str, end_op: str,
                       via_ops: list[str] | None = None,
-                      unelec_penalty_m: float = 0.0) -> pd.DataFrame:
+                      unelec_penalty_m: float = 0.0) -> pd.DataFrame | None:
         waypoints = [start_op] + (via_ops or []) + [end_op]
         all_steps: list[dict] = []
         for i in range(len(waypoints) - 1):
             _, path = self.dijkstra(waypoints[i], waypoints[i + 1], unelec_penalty_m)
             if not path:
-                return pd.DataFrame()
+                return None
             all_steps.extend(path)
         if not all_steps:
-            return pd.DataFrame()
+            return None
 
         def _stop_type(oid: str) -> str:
             types = self.op_info.get(oid, {}).get("types", [])
@@ -475,9 +475,14 @@ class DYPODParser:
 class TrackProfile:
     def __init__(self, df: pd.DataFrame):
         self.df       = df.copy().reset_index(drop=True)
-        self.segments = self._build_segs()
-        self.stations = self._build_stations()
-        self.total_km = float(df["cum_km"].max())
+        if self.df.empty:
+            self.total_km = 0.0
+            self.segments = []
+            self.stations = []
+        else:
+            self.total_km = float(self.df["cum_km"].max())
+            self.segments = self._build_segs()
+            self.stations = self._build_stations()
 
     def _build_segs(self) -> list[dict]:
         segs = []
@@ -510,10 +515,12 @@ class TrackProfile:
         return self.segments[-1] if self.segments else {}
 
     def v_limit_span(self, front_km: float, rear_km: float) -> float:
+        if not self.segments:
+            return 0.0
         lo, hi = min(front_km, rear_km), max(front_km, rear_km)
         lims = [s["v_limit"] for s in self.segments
                 if lo <= s["km_end"] + 1e-6 and hi >= s["km_start"] - 1e-6]
-        return min(lims) if lims else 0.0
+        return min(lims) if lims else self.segments[-1]["v_limit"]
 
     @property
     def n_mandatory(self) -> int:
@@ -572,8 +579,10 @@ class TrainSimulator:
         stop_names: list[str]   = []
         for st in track.stations:
             km = st["km"]
-            if km <= 1e-3 or km >= track.total_km - 1e-3:
+            if km <= 1e-3: # Always skip the starting point
                 continue
+            if km >= track.total_km - 1e-3:
+                continue # We manually append the destination later
             will = (st["type"] == "X") or (
                 st["type"] == "R" and (
                     stop_mode == "all" or
@@ -584,11 +593,24 @@ class TrainSimulator:
                 stops_km.append(km)
                 stop_names.append(st["name"])
 
+        # Train MUST ALWAYS stop at the final destination
+        if track.total_km > 0.0:
+            stops_km.append(track.total_km)
+            stop_names.append("Destination")
+
         v = dist = e_j = r_j = t_s = 0.0
         hist = {k: [] for k in ("time_s", "km", "v_kmh", "v_limit_kmh",
                                  "gross_kwh", "regen_kwh", "net_kwh")} if record else None
 
+        # Watchdog limit to prevent infinite loops on impossible climbs
+        max_iters = int(total_m / 0.1) + 36000
+        iters = 0
+
         while dist < total_m:
+            iters += 1
+            if iters > max_iters:
+                raise RuntimeError(f"Simulation stalled indefinitely at km {km:.2f} (Speed dropped to 0 and cannot overcome resistance/gradient).")
+
             km       = dist / 1000.0
             rear_km  = max(0.0, km - self.length_m / 1000.0)
             seg      = track.seg_at(km)
@@ -615,12 +637,11 @@ class TrainSimulator:
             f_grad    = self.mass_kg * g * slope
             eff_decel = max(0.05, self.max_decel + g * slope)
 
-            # Braking look-ahead for upcoming stops
+            # Braking look-ahead for the NEXT upcoming stop
             max_safe = v_lim
-            for s_km in stops_km:
-                if s_km < km - 0.01:
-                    continue
-                d2s      = (s_km - km) * 1000.0
+            next_stop = next((s for s in stops_km if s >= km - 0.01), None)
+            if next_stop is not None:
+                d2s = (next_stop - km) * 1000.0
                 max_safe = min(max_safe, math.sqrt(max(0.0, 2.0 * eff_decel * d2s)))
 
             if hist is not None:
@@ -687,6 +708,11 @@ class TrainSimulator:
                 else:
                     e_j += self.aux_w * dwell
                     t_s += dwell
+
+                # Check if we arrived at the final destination
+                if any(abs(track.total_km - s) <= 0.05 for s in stops_km if abs(km - s) <= 0.05):
+                    break
+
                 stops_km = [s for s in stops_km if abs(s - km) > 0.05]
 
         return hist, stop_names, dict(
@@ -768,7 +794,7 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
 
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
-        subplot_titles=("Speed profile [km/h]",
+        subplot_titles=("Track Speed Limit [km/h]",
                         "Gradient [‰]  (↑ uphill  ↓ downhill)",
                         "Electrification"),
         row_heights=[0.48, 0.32, 0.20], vertical_spacing=0.055,
@@ -791,7 +817,7 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
 
     fig.add_trace(go.Scatter(
         x=df["cum_km"], y=df["speed_kmh"],
-        mode="lines", name="Speed limit",
+        mode="lines", name="Statutory Limit",
         line=dict(color=C["primary"], width=2.5, shape="hv"),
         fill="tozeroy", fillcolor=C["bg_blue"],
         hovertemplate=hover_txt,
@@ -902,9 +928,6 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         fig.add_vline(x=sr["cum_km"], line_width=0.7, line_dash="dot",
                       line_color="#CBD5E1", row=1, col=1)
 
-    # Y-axis range for speed: do NOT force rangemode=tozero — that squashes
-    # the speed variations.  Instead set a sensible lower bound so small
-    # differences (e.g. 60 vs 100 km/h) are clearly visible.
     spd_min = float(df["speed_kmh"].min())
     spd_max = float(df["speed_kmh"].max())
     spd_lo  = max(0, spd_min * 0.75)   # 25% headroom below min
@@ -931,31 +954,11 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
 
 def make_route_map(df: pd.DataFrame, via_ops: list,
                    parser: DYPODParser, show_halts: bool = True) -> go.Figure:
-    """
-    Renders the route on an OpenStreetMap base.
-
-    Map colouring fix
-    -----------------
-    The old approach grouped all rows by electrification value and drew one
-    Scattermap trace per group.  Scattermap mode="lines" connects every point
-    in the trace in order — so if a NONE segment sits between two electrified
-    segments, the three points end up in two different traces and the
-    electrification grouping draws the NONE colour only as a short isolated
-    stub between the electrified segments, effectively invisible.
-
-    The fix: build one trace per CONTIGUOUS run of the same electrification
-    (using None-separator segments), so each uninterrupted stretch of the same
-    system is a single line, and every segment is correctly coloured regardless
-    of whether it is isolated or part of a long stretch.
-    """
+    """Renders the route on an OpenStreetMap base."""
     map_df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
     fig    = go.Figure()
 
     if not map_df.empty:
-        # Build contiguous runs of the same electrification system.
-        # Each run becomes one Scattermap trace with None separators between
-        # non-adjacent pairs (there are none within a run, but we add the
-        # closing point for the last segment of each run).
         runs: list[dict] = []   # {electr, lats, lons, hover}
         cur_electr  = None
         cur_lats:  list = []
@@ -982,18 +985,15 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
             cur_lons.append(float(row_b["lon"]))
             cur_hover.append(f"{seg_electr}<br>km {row_b['cum_km']:.2f}")
 
-        # Flush last run
         if cur_lats:
             runs.append(dict(electr=cur_electr,
                              lats=cur_lats, lons=cur_lons, hover=cur_hover))
 
-        # Draw one trace per run (each is a contiguous same-electrification stretch)
         seen_labels: set = set()
         for run in runs:
             show_leg = run["electr"] not in seen_labels
             seen_labels.add(run["electr"])
             col = elec_color(run["electr"])
-            # Line width: thicker for electrified, slightly thinner for NONE
             lw  = 5 if run["electr"] != "NONE" else 4
             fig.add_trace(go.Scattermap(
                 lat=run["lats"], lon=run["lons"],
@@ -1005,7 +1005,6 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
                 hovertemplate="%{hovertext}<extra></extra>",
             ))
 
-    # Request halts (R) — small yellow dots
     if show_halts:
         r_pts = map_df[map_df["stop_type"] == "R"]
         if not r_pts.empty:
@@ -1018,7 +1017,6 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
                 hovertemplate="<b>%{customdata}</b><extra></extra>",
             ))
 
-    # Mandatory stations (X) — orange diamonds with labels
     x_pts = map_df[map_df["stop_type"] == "X"]
     if not x_pts.empty:
         fig.add_trace(go.Scattermap(
@@ -1038,7 +1036,6 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
             ),
         ))
 
-    # Via waypoints — large yellow pins
     for vid in (via_ops or []):
         info = parser.op_info.get(vid, {})
         if info.get("lat") and info.get("lon"):
@@ -1051,8 +1048,6 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
                 name=f"Via: {info['name']}", showlegend=False,
             ))
 
-    # Departure (green) and Arrival (red) — MUST be separate traces,
-    # Scattermap rejects list-valued textposition.
     if not map_df.empty:
         for row_lat, row_lon, row_name, tpos, col, leg in [
             (float(map_df["lat"].iloc[0]),  float(map_df["lon"].iloc[0]),
@@ -1184,10 +1179,7 @@ with st.sidebar:
     st.markdown('<div class="sec">🗺️ Route</div>', unsafe_allow_html=True)
 
     def _station_selector(label: str, key_q: str, key_sel: str) -> str | None:
-        """
-        Text input + filtered selectbox.
-        Returns selected op_id or None.
-        """
+        """Text input + filtered selectbox."""
         query = st.text_input(label, key=key_q, placeholder="Type to search…")
         results = parser.search_stations(query)
         if not results:
@@ -1294,7 +1286,7 @@ if btn_profile and op_start and op_end:
         df  = parser.build_profile(op_start, op_end,
                                    via_ops=st.session_state.via_ops or [],
                                    unelec_penalty_m=pen)
-    if df.empty:
+    if df is None or df.empty:
         st.error("No path found between the selected stations. "
                  "They may not be connected in this export.")
     else:
@@ -1324,43 +1316,54 @@ if btn_run and st.session_state.profile_df is not None:
             st.error(str(e))
 
 if btn_mc and st.session_state.profile_df is not None and mc_probs:
-    with st.spinner(f"Monte Carlo — {int(mc_n)} × {len(mc_probs)} probabilities…"):
-        try:
-            track = TrackProfile(st.session_state.profile_df)
-            sim   = TrainSimulator(mass, length, power, aux_power,
-                                   accel, decel, traction, efficiency,
-                                   coast_threshold_m=coast_threshold_m)
-            rows_mc = []
-            for p_val in sorted(mc_probs, reverse=True):
-                sm = ("all" if p_val == 1.0 else
-                      "none" if p_val == 0.0 else "random")
-                e_list, t_list = [], []
-                for _ in range(int(mc_n)):
-                    _, _, st_ = sim.run(track, sm, p_val, dwell)
-                    e_list.append(to_unit(st_, traction, diesel_d, efficiency))
-                    t_list.append(st_["journey_time_s"])
-                rows_mc.append(dict(
-                    prob=f"{int(p_val * 100)}%", p_num=p_val,
-                    mean_e=np.mean(e_list),  std_e=np.std(e_list),
-                    min_e=np.min(e_list),    max_e=np.max(e_list),
-                    mean_t=np.mean(t_list),  min_t=np.min(t_list), max_t=np.max(t_list),
-                ))
-            mc_df = pd.DataFrame(rows_mc)
-            mc_df["savings"] = (mc_df["mean_e"].max() - mc_df["mean_e"]).clip(lower=0)
-            mc_df["unit"]    = unit_lbl
-            st.session_state.mc_result = mc_df
-        except RuntimeError as e:
-            st.error(str(e))
+    try:
+        track = TrackProfile(st.session_state.profile_df)
+        sim   = TrainSimulator(mass, length, power, aux_power,
+                               accel, decel, traction, efficiency,
+                               coast_threshold_m=coast_threshold_m)
+        rows_mc = []
+
+        # Interactive Progress Bar so the UI doesn't silently freeze
+        prog_bar = st.progress(0.0, text="Initializing Monte Carlo Engine...")
+        total_runs = len(mc_probs) * int(mc_n)
+        completed_runs = 0
+
+        for p_val in sorted(mc_probs, reverse=True):
+            sm = ("all" if p_val == 1.0 else "none" if p_val == 0.0 else "random")
+            e_list, t_list = [], []
+            for _ in range(int(mc_n)):
+                _, _, st_ = sim.run(track, sm, p_val, dwell)
+                e_list.append(to_unit(st_, traction, diesel_d, efficiency))
+                t_list.append(st_["journey_time_s"])
+
+                completed_runs += 1
+                if completed_runs % max(1, total_runs // 20) == 0:
+                    prog_bar.progress(completed_runs / total_runs, text=f"Computing permutations ({completed_runs}/{total_runs})")
+
+            rows_mc.append(dict(
+                prob=f"{int(p_val * 100)}%", p_num=p_val,
+                mean_e=np.mean(e_list),  std_e=np.std(e_list),
+                min_e=np.min(e_list),    max_e=np.max(e_list),
+                mean_t=np.mean(t_list),  min_t=np.min(t_list), max_t=np.max(t_list),
+            ))
+        prog_bar.empty()
+
+        mc_df = pd.DataFrame(rows_mc)
+        mc_df["savings"] = (mc_df["mean_e"].max() - mc_df["mean_e"]).clip(lower=0)
+        mc_df["unit"]    = unit_lbl
+        st.session_state.mc_result = mc_df
+    except RuntimeError as e:
+        st.error(str(e))
 
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 tab_prof, tab_edit, tab_run_t, tab_mc_t = st.tabs([
-    "🗺️  Track Profile", "✏️  Profile Editor", "▶️  Run", "🎲  Monte Carlo",
+    "🗺️ Infrastructure Limits", "✏️ Profile Editor", "▶️ Kinematic Simulation", "🎲 Monte Carlo",
 ])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TAB 1 – TRACK PROFILE
+#  TAB 1 – TRACK PROFILE (INFRASTRUCTURE LIMITS)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_prof:
     df  = st.session_state.profile_df
@@ -1386,6 +1389,7 @@ with tab_prof:
     en       = df["station_name"].iloc[-1]
 
     st.markdown(f"### 📍 {sn}  →  {en}")
+    st.caption("⚠️ **Note:** The chart below shows the maximum allowed track speed (statutory limits). To view the train's actual acceleration and braking curves, run a simulation and check the **▶️ Kinematic Simulation** tab.")
 
     # Electrification alerts
     if ea is not None and traction == "ELECTRIC":
@@ -1407,7 +1411,7 @@ with tab_prof:
 
     # KPI row
     kc = st.columns(6)
-    kc[0].markdown(kpi_card(f"{total_km:.1f} km",       "Route length"),           unsafe_allow_html=True)
+    kc[0].markdown(kpi_card(f"{total_km:.1f} km",       "Route length"),            unsafe_allow_html=True)
     kc[1].markdown(kpi_card(str(len(stops_x)),           "Mandatory stops (X)"),    unsafe_allow_html=True)
     kc[2].markdown(kpi_card(str(len(stops_r)),           "Request halts (R)"),      unsafe_allow_html=True)
     kc[3].markdown(kpi_card(f"{max_spd:.0f} km/h",      "Max speed"),              unsafe_allow_html=True)
@@ -1475,9 +1479,7 @@ with tab_prof:
                       "electrification", "n_tracks", "stop_type"]].copy()
         spd_df = spd_df[spd_df["station_name"].str.strip().ne("")].reset_index(drop=True)
 
-        # Colour cells by speed using a Plotly table (no matplotlib needed)
         def _spd_cell_color(v):
-            # Green=fast, Yellow=medium, Red=slow — interpolate 30..160 km/h
             lo, hi = 30.0, 160.0
             t = max(0.0, min(1.0, (float(v) - lo) / (hi - lo)))
             r = int(220 * (1 - t) + 34 * t)
@@ -1578,7 +1580,7 @@ with tab_edit:
                     st.session_state.via_ops[i - 1], st.session_state.via_ops[i])
                 st.rerun()
             e3.markdown(
-                f"📍 **{info.get('name', vid)}**  "
+                f"📍 **{info.get('name', vid)}** "
                 f"<span style='color:{C['grey']};font-size:.8rem'>"
                 f"{', '.join(info.get('types', []))}</span>",
                 unsafe_allow_html=True,
@@ -1593,15 +1595,8 @@ with tab_edit:
     else:
         st.markdown('<div class="info-box">No via-waypoints set. The router uses the direct shortest path.</div>', unsafe_allow_html=True)
 
-    # Map
+    # Editable overrides
     if df is not None:
-        st.markdown('<div class="sec">🗺️ Current Route Map</div>', unsafe_allow_html=True)
-        st.plotly_chart(
-            make_route_map(df, st.session_state.via_ops or [], parser),
-            use_container_width=True,
-        )
-
-        # Editable overrides
         st.markdown('<div class="sec">📝 Speed & Stop Overrides</div>', unsafe_allow_html=True)
         st.caption(
             "Edit speed limits or stop types directly. "
@@ -1614,7 +1609,7 @@ with tab_edit:
         edited = st.data_editor(
             df[edit_cols].copy(),
             column_config={
-                "station_name":    st.column_config.TextColumn("Waypoint",     disabled=True, width="large"),
+                "station_name":    st.column_config.TextColumn("Waypoint",      disabled=True, width="large"),
                 "stop_type":       st.column_config.SelectboxColumn("Stop",    options=["X", "R", ""], width="small"),
                 "speed_kmh":       st.column_config.NumberColumn("Speed [km/h]", min_value=0, max_value=350, width="small"),
                 "gradient_perm":   st.column_config.NumberColumn("Grad [‰]",  disabled=True, width="small"),
@@ -1630,13 +1625,13 @@ with tab_edit:
             updated["stop_type"] = edited["stop_type"].values
             st.session_state.profile_df = updated
             st.session_state.rep_result = None
-            st.success("✅ Profile updated. Run the simulation from the **▶️ Run** tab.")
+            st.success("✅ Profile updated. Run the simulation from the **▶️ Kinematic Simulation** tab.")
     else:
         st.info("Build a track profile first (sidebar → **Build Track Profile**).")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TAB 3 – REPRESENTATIVE RUN
+#  TAB 3 – KINEMATIC SIMULATION (REPRESENTATIVE RUN)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_run_t:
     rep = st.session_state.rep_result
@@ -1676,15 +1671,19 @@ with tab_run_t:
     if hist:
         fig3 = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
-            subplot_titles=("Speed profile [km/h]", "Cumulative energy [kWh]"),
+            subplot_titles=("Simulated Train Speed [km/h]", "Cumulative Energy [kWh]"),
             vertical_spacing=0.10, row_heights=[0.55, 0.45],
         )
+        # Note for long routes:
+        if tot_km > 30:
+            st.caption("🔍 **Tip:** On routes longer than 30km, the acceleration/braking curves might appear vertically squashed. Drag a box over the chart to zoom in and see the detailed train kinematics.")
+
         fig3.add_trace(go.Scatter(
-            x=hist["km"], y=hist["v_limit_kmh"], name="Speed limit",
+            x=hist["km"], y=hist["v_limit_kmh"], name="Track Limit",
             line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")),
             row=1, col=1)
         fig3.add_trace(go.Scatter(
-            x=hist["km"], y=hist["v_kmh"], name="Actual speed",
+            x=hist["km"], y=hist["v_kmh"], name="Train Speed",
             line=dict(color=C["primary"], width=2.5),
             fill="tozeroy", fillcolor=C["bg_blue"]), row=1, col=1)
         fig3.add_trace(go.Scatter(
@@ -1768,9 +1767,10 @@ with tab_run_t:
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_mc_t:
     mc_df = st.session_state.mc_result
+    df_p  = st.session_state.profile_df
+
     if mc_df is None:
         st.info("👈 Build a profile, then click **🎲 MC** in the sidebar.")
-        df_p = st.session_state.profile_df
         if df_p is not None:
             tr = TrackProfile(df_p)
             if tr.n_request == 0:
@@ -1785,7 +1785,6 @@ with tab_mc_t:
         st.stop()
 
     ul     = mc_df["unit"].iloc[0]
-    df_p   = st.session_state.profile_df
     route_n = (f"{df_p['station_name'].iloc[0]} → {df_p['station_name'].iloc[-1]}"
                if df_p is not None else "")
 
