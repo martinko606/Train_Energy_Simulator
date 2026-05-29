@@ -152,17 +152,29 @@ class DYPODParser:
             )
 
     def _parse_segs(self):
-        # Gradient parsing - Extracts intrinsic gradient of the netElement
-        grad_map: dict[str, float] = {}
+        # Gradient parsing - Resolves applicationDirection to correctly orient inclines
+        grad_map: dict[str, dict] = {}
         for gc in self._root.iter("gradientCurve"):
             grad = float(gc.get("gradient", 0))
             loc  = gc.find("linearLocation")
             if loc is None: continue
+
+            app_dir = loc.get("applicationDirection", "normal")
+
             ane = loc.find("associatedNetElement")
             if ane is None: continue
             ne_ref = ane.get("netElementRef", "")
-            # Assume gradient belongs to the natural direction of the netElement
-            grad_map[ne_ref] = grad
+
+            if ne_ref not in grad_map:
+                grad_map[ne_ref] = {"normal": 0.0, "reverse": 0.0}
+
+            # Safely assign normal and reverse based on the railML orientation tag
+            if app_dir in ("normal", "both"):
+                grad_map[ne_ref]["normal"] = grad
+                grad_map[ne_ref]["reverse"] = -grad
+            elif app_dir == "reverse":
+                grad_map[ne_ref]["reverse"] = grad
+                grad_map[ne_ref]["normal"] = -grad
 
         # Electrification
         elec_map: dict[str, str] = {}
@@ -222,8 +234,8 @@ class DYPODParser:
             lp_spd = int(lp.get("maxSpeed", 0)) if lp is not None else 0
             self._line_max[ne_ref] = lp_spd
 
-            # Correctly map the gradient. Normal = +grad, Reverse = -grad
-            gr     = grad_map.get(ne_ref, 0.0)
+            # Retrieve perfectly oriented gradients
+            gr_dict = grad_map.get(ne_ref, {"normal": 0.0, "reverse": 0.0})
             electr = elec_map.get(ne_ref, "NONE")
             gps    = gps_map.get(ne_ref, (None, None))
 
@@ -232,8 +244,8 @@ class DYPODParser:
                 length_m       = length_m,
                 speed_normal   = self._speed_for(ne_ref, "normal"),
                 speed_reverse  = self._speed_for(ne_ref, "reverse"),
-                grad_normal    = gr,
-                grad_reverse   = -gr,
+                grad_normal    = gr_dict["normal"],
+                grad_reverse   = gr_dict["reverse"],
                 electrification= electr,
                 recuperation   = 0 if electr == "NONE" else 1,
                 braking_dist   = int(lp.get("signalledBrakingDistance", 0)) if lp is not None else 0,
