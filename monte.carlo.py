@@ -797,47 +797,64 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         hovertemplate=hover_txt,
     ), row=1, col=1)
 
-    # Speed-change annotations: mark every boundary where speed changes
+    # Speed-change markers — tick at each boundary where speed changes
     spd_changes = df[df["speed_kmh"].diff().abs() > 0.5].copy()
-    if not spd_changes.empty and len(spd_changes) <= 40:
+    if not spd_changes.empty:
         fig.add_trace(go.Scatter(
             x=spd_changes["cum_km"], y=spd_changes["speed_kmh"],
             mode="markers",
-            marker=dict(symbol="line-ns", size=10, color=C["primary"],
+            marker=dict(symbol="line-ns", size=12, color=C["primary"],
                         line=dict(color=C["primary"], width=2)),
             name="Speed change",
             showlegend=False,
             hovertemplate="km %{x:.2f}<br><b>%{y:.0f} km/h</b><extra></extra>",
         ), row=1, col=1)
 
-    # Station X markers
-    if not stops_x.empty:
+    # Station X markers — smart thinning to avoid label overlap
+    # Show text labels for every Nth stop based on route density
+    n_x = max(len(stops_x), 1)
+    # Target ~20 labelled stops regardless of route length
+    label_every = max(1, n_x // 20)
+    labelled_x  = stops_x.iloc[::label_every]
+    unlabelled_x = stops_x[~stops_x.index.isin(labelled_x.index)]
+
+    if not labelled_x.empty:
         fig.add_trace(go.Scatter(
-            x=stops_x["cum_km"], y=stops_x["speed_kmh"],
+            x=labelled_x["cum_km"], y=labelled_x["speed_kmh"],
             mode="markers+text",
-            marker=dict(symbol="diamond", size=10, color=C["accent"],
+            marker=dict(symbol="diamond", size=9, color=C["accent"],
                         line=dict(color="white", width=1.5)),
-            text=stops_x["station_name"], textposition="top center",
+            text=labelled_x["station_name"],
+            textposition="top center",
             textfont=dict(size=7, color=C["dark"]),
             name="Station (X)",
             hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
         ), row=1, col=1)
 
-    # Halt R markers
-    if not stops_r.empty:
+    if not unlabelled_x.empty:
         fig.add_trace(go.Scatter(
-            x=stops_r["cum_km"], y=stops_r["speed_kmh"],
-            mode="markers+text",
-            marker=dict(symbol="circle", size=8, color=C["yellow"],
+            x=unlabelled_x["cum_km"], y=unlabelled_x["speed_kmh"],
+            mode="markers",
+            marker=dict(symbol="diamond", size=6, color=C["accent"],
                         line=dict(color="white", width=1)),
-            text=stops_r["station_name"], textposition="top center",
-            textfont=dict(size=6.5, color="#78350F"),
-            name="Halt (R)",
+            showlegend=False,
+            text=unlabelled_x["station_name"],
             hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
         ), row=1, col=1)
 
-    # ── Gradient — stepped bars ───────────────────────────────────────────────
-    # Use Scatter with shape="hv" and fill for a clean step profile
+    # Halt R markers — marker only (text too dense on regional lines)
+    if not stops_r.empty:
+        fig.add_trace(go.Scatter(
+            x=stops_r["cum_km"], y=stops_r["speed_kmh"],
+            mode="markers",
+            marker=dict(symbol="circle", size=7, color=C["yellow"],
+                        line=dict(color="white", width=1)),
+            name="Halt (R)",
+            text=stops_r["station_name"],
+            hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+        ), row=1, col=1)
+
+    # ── Gradient — stepped fill ────────────────────────────────────────────────
     pos_g = df["gradient_perm"].clip(lower=0)
     neg_g = df["gradient_perm"].clip(upper=0)
     fig.add_trace(go.Scatter(
@@ -855,10 +872,7 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         hovertemplate="km %{x:.2f}<br>%{y:.1f} ‰<extra></extra>",
     ), row=2, col=1)
 
-    # ── Electrification — coloured segment band ───────────────────────────────
-    # Build explicit segment rectangles: for each row i, a bar from cum_km[i]
-    # to cum_km[i+1], coloured by electrification[i].
-    # Using a Bar trace with x=midpoint and width=segment_length gives correct colouring.
+    # ── Electrification band — one bar per segment, exact width ───────────────
     mid_km, seg_widths, seg_colors, seg_hover = [], [], [], []
     for i in range(len(df) - 1):
         x0 = float(df["cum_km"].iloc[i])
@@ -867,7 +881,6 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         seg_widths.append(max(x1 - x0, 0.001))
         seg_colors.append(elec_color(df["electrification"].iloc[i]))
         seg_hover.append(df["electrification"].iloc[i])
-    # Add final row as zero-width sentinel
     if len(df) > 0:
         mid_km.append(float(df["cum_km"].iloc[-1]))
         seg_widths.append(0.001)
@@ -884,20 +897,28 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         showlegend=False,
     ), row=3, col=1)
 
-    # Vertical stop lines on speed panel
-    for _, sr in stops_x.iterrows():
-        fig.add_vline(x=sr["cum_km"], line_width=0.8, line_dash="dot",
+    # Vertical stop lines on speed panel — only for labelled stops
+    for _, sr in labelled_x.iterrows():
+        fig.add_vline(x=sr["cum_km"], line_width=0.7, line_dash="dot",
                       line_color="#CBD5E1", row=1, col=1)
+
+    # Y-axis range for speed: do NOT force rangemode=tozero — that squashes
+    # the speed variations.  Instead set a sensible lower bound so small
+    # differences (e.g. 60 vs 100 km/h) are clearly visible.
+    spd_min = float(df["speed_kmh"].min())
+    spd_max = float(df["speed_kmh"].max())
+    spd_lo  = max(0, spd_min * 0.75)   # 25% headroom below min
+    spd_hi  = spd_max * 1.25           # 25% headroom above max for labels
 
     fig.update_xaxes(title_text="Distance from departure [km]",
                      row=3, col=1, gridcolor=C["light"])
     fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1,
-                     gridcolor=C["light"], rangemode="tozero")
+                     gridcolor=C["light"], range=[spd_lo, spd_hi])
     fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1,
                      gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     fig.update_yaxes(showticklabels=False, row=3, col=1, range=[0, 1.1])
     fig.update_layout(
-        height=740, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
+        height=760, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0",
                     borderwidth=1),
@@ -1448,18 +1469,58 @@ with tab_prof:
             st.metric("RMS gradient", f"{(g_vals**2).mean()**0.5:.1f} ‰")
             st.metric("Mean",         f"{g_vals.mean():.1f} ‰")
 
-    # Speed profile summary
+    # Speed profile summary — pure Plotly, no matplotlib dependency
     with st.expander("⚡ Speed profile summary"):
         spd_df = df[["cum_km", "station_name", "speed_kmh", "gradient_perm",
-                      "electrification", "n_tracks"]].copy()
-        spd_df.columns = ["km", "Waypoint", "Speed [km/h]", "Grad [‰]",
-                           "Electrification", "Tracks"]
-        # Highlight speed changes
-        st.dataframe(
-            spd_df.style.background_gradient(subset=["Speed [km/h]"],
-                                              cmap="RdYlGn", vmin=30, vmax=160),
-            use_container_width=True, hide_index=True, height=300,
+                      "electrification", "n_tracks", "stop_type"]].copy()
+        spd_df = spd_df[spd_df["station_name"].str.strip().ne("")].reset_index(drop=True)
+
+        # Colour cells by speed using a Plotly table (no matplotlib needed)
+        def _spd_cell_color(v):
+            # Green=fast, Yellow=medium, Red=slow — interpolate 30..160 km/h
+            lo, hi = 30.0, 160.0
+            t = max(0.0, min(1.0, (float(v) - lo) / (hi - lo)))
+            r = int(220 * (1 - t) + 34 * t)
+            g = int(38  * (1 - t) + 197 * t)
+            b = int(38  * (1 - t) + 94 * t)
+            return f"rgba({r},{g},{b},0.25)"
+
+        stop_icons = spd_df["stop_type"].map({"X": "🚉", "R": "🛑"}).fillna("")
+        labels = stop_icons + " " + spd_df["station_name"].str.strip()
+
+        fig_tbl = go.Figure(go.Table(
+            columnwidth=[60, 200, 80, 70, 160, 70],
+            header=dict(
+                values=["km", "Waypoint", "Speed [km/h]", "Grad [‰]",
+                        "Electrification", "Tracks"],
+                fill_color=C["dark"], font=dict(color="white", size=12),
+                align="left", height=28,
+            ),
+            cells=dict(
+                values=[
+                    spd_df["cum_km"].round(2),
+                    labels,
+                    spd_df["speed_kmh"].astype(int),
+                    spd_df["gradient_perm"].round(1),
+                    spd_df["electrification"],
+                    spd_df["n_tracks"],
+                ],
+                fill_color=[
+                    ["#F8FAFC"] * len(spd_df),
+                    ["#F8FAFC"] * len(spd_df),
+                    [_spd_cell_color(v) for v in spd_df["speed_kmh"]],
+                    ["#F8FAFC"] * len(spd_df),
+                    [elec_color(e) + "44" for e in spd_df["electrification"]],
+                    ["#F8FAFC"] * len(spd_df),
+                ],
+                font=dict(size=11), align="left", height=24,
+            ),
+        ))
+        fig_tbl.update_layout(
+            height=min(60 + len(spd_df) * 26, 460),
+            margin=dict(l=0, r=0, t=0, b=0),
         )
+        st.plotly_chart(fig_tbl, use_container_width=True)
 
     # Full data table
     with st.expander("📋 Full profile data table"):
