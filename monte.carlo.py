@@ -56,21 +56,6 @@ PREDEFINED_VEHICLES = {
 class DYPODParser:
     """
     Parses a DYPOD railML 3.2 export.
-
-    Speed handling
-    --------------
-    Each meso-level segment (line element) can contain multiple track
-    sub-elements (neCZ…_1, _1a, _2 …).  Each sub-element has its own
-    speedSection pair (_normal / _reverse).  We take the MINIMUM speed
-    across all sub-tracks per direction — the most restrictive value that
-    any train on the segment must honour.
-    For the 82 segments with no speedSection we fall back to
-    linePerformance.maxSpeed (if available) then to 30 km/h (siding/depot).
-
-    Gradient handling
-    -----------------
-    gradientCurve.applicationDirection ∈ {normal, reverse} maps directly
-    to travel direction (beginsInOP→endsInOP = normal, reverse = opposite).
     """
 
     def __init__(self, xml_path: str):
@@ -79,24 +64,22 @@ class DYPODParser:
         self._esys:      dict[str, str]              = {}
         self._sub2seg:   dict[str, str]              = {}
         self._seg_speeds:dict[str, dict[str, list]]  = defaultdict(lambda: {"normal": [], "reverse": []})
-        self._line_max:  dict[str, int]              = {}   # ne_ref -> linePerformance maxSpeed
+        self._line_max:  dict[str, int]              = {}
         self.op_info:    dict[str, dict]             = {}
         self.seg_props:  dict[str, dict]             = {}
         self.graph:      dict[str, list]             = {}
         self.op_by_name: dict[str, list]             = {}
-        # sorted list of (name, op_id) for search
         self.station_list: list[tuple[str, str]]     = []
 
         self._parse_esys()
         self._parse_sub2seg()
-        self._parse_speed_sections()   # builds _seg_speeds
+        self._parse_speed_sections()
         self._parse_ops()
         self._parse_segs()
         self._build_graph()
         self._build_indexes()
         self.parse_time = round(time.time() - t0, 2)
 
-    # ── XML ───────────────────────────────────────────────────────────────────
     @staticmethod
     def _strip_ns(root: ET.Element) -> ET.Element:
         for el in root.iter():
@@ -104,7 +87,6 @@ class DYPODParser:
                 el.tag = el.tag.split("}", 1)[1]
         return root
 
-    # ── Electrification systems ───────────────────────────────────────────────
     def _parse_esys(self):
         for es in self._root.iter("electrificationSystem"):
             v, f = es.get("voltage", "0"), es.get("frequency", "0")
@@ -112,7 +94,6 @@ class DYPODParser:
                 "NONE" if v == "0" else f"{int(float(v)):,}V/{f}Hz"
             )
 
-    # ── Track-sub → segment map ────────────────────────────────────────────────
     def _parse_sub2seg(self):
         for ne in self._root.iter("netElement"):
             ne_id = ne.get("id", "")
@@ -123,7 +104,6 @@ class DYPODParser:
                     if ref:
                         self._sub2seg[ref] = ne_id
 
-    # ── Speed sections (min-of-all-sub-tracks strategy) ────────────────────────
     def _parse_speed_sections(self):
         for ss in self._root.iter("speedSection"):
             ss_id = ss.get("id", "")
@@ -139,24 +119,16 @@ class DYPODParser:
             self._seg_speeds[seg_ne][direction].append(maxsp)
 
     def _speed_for(self, ne_ref: str, direction: str) -> float:
-        """
-        Returns the direction-specific speed limit for a segment.
-        Takes the minimum across all sub-track speed sections.
-        Falls back to linePerformance maxSpeed, then to 30 km/h.
-        """
         vals = self._seg_speeds.get(ne_ref, {}).get(direction, [])
         if vals:
             return float(min(vals))
-        # Try opposite direction (some segments only have one direction)
         other = "reverse" if direction == "normal" else "normal"
         vals_other = self._seg_speeds.get(ne_ref, {}).get(other, [])
         if vals_other:
             return float(min(vals_other))
-        # Fall back to linePerformance
         lp = self._line_max.get(ne_ref, 0)
-        return float(lp) if lp > 0 else 30.0   # 30 km/h for siding/depot connections
+        return float(lp) if lp > 0 else 30.0
 
-    # ── Operational points ─────────────────────────────────────────────────────
     def _parse_ops(self):
         for op in self._root.iter("operationalPoint"):
             oid = op.get("id", "")
@@ -179,20 +151,18 @@ class DYPODParser:
                 n_tracks=n_tracks, connected_lines=conn, sr70=sr70,
             )
 
-    # ── Segment properties ─────────────────────────────────────────────────────
     def _parse_segs(self):
-        # Gradient
-        grad_map: dict[str, dict] = {}
+        # Gradient parsing - Extracts intrinsic gradient of the netElement
+        grad_map: dict[str, float] = {}
         for gc in self._root.iter("gradientCurve"):
             grad = float(gc.get("gradient", 0))
             loc  = gc.find("linearLocation")
-            if loc is None:
-                continue
+            if loc is None: continue
             ane = loc.find("associatedNetElement")
-            if ane is None:
-                continue
+            if ane is None: continue
             ne_ref = ane.get("netElementRef", "")
-            grad_map.setdefault(ne_ref, {})[loc.get("applicationDirection", "normal")] = grad
+            # Assume gradient belongs to the natural direction of the netElement
+            grad_map[ne_ref] = grad
 
         # Electrification
         elec_map: dict[str, str] = {}
@@ -248,11 +218,12 @@ class DYPODParser:
             lp  = line.find("linePerformance")
             lo  = line.find("lineOperation")
             ll  = line.find("lineLayout")
-            # Store linePerformance maxSpeed for fallback
+
             lp_spd = int(lp.get("maxSpeed", 0)) if lp is not None else 0
             self._line_max[ne_ref] = lp_spd
 
-            gr     = grad_map.get(ne_ref, {})
+            # Correctly map the gradient. Normal = +grad, Reverse = -grad
+            gr     = grad_map.get(ne_ref, 0.0)
             electr = elec_map.get(ne_ref, "NONE")
             gps    = gps_map.get(ne_ref, (None, None))
 
@@ -261,8 +232,8 @@ class DYPODParser:
                 length_m       = length_m,
                 speed_normal   = self._speed_for(ne_ref, "normal"),
                 speed_reverse  = self._speed_for(ne_ref, "reverse"),
-                grad_normal    = gr.get("normal",  0.0),
-                grad_reverse   = gr.get("reverse", 0.0),
+                grad_normal    = gr,
+                grad_reverse   = -gr,
                 electrification= electr,
                 recuperation   = 0 if electr == "NONE" else 1,
                 braking_dist   = int(lp.get("signalledBrakingDistance", 0)) if lp is not None else 0,
@@ -272,7 +243,6 @@ class DYPODParser:
                 gps_end        = gps[1],
             )
 
-    # ── Graph ──────────────────────────────────────────────────────────────────
     def _build_graph(self):
         for line in self._root.iter("line"):
             b_el = line.find("beginsInOP")
@@ -290,7 +260,6 @@ class DYPODParser:
             self.graph.setdefault(e_op, []).append(
                 dict(to=b_op, ne_id=ne_ref, length_m=length_m, forward=False, electr=electr))
 
-    # ── Search indexes ─────────────────────────────────────────────────────────
     def _build_indexes(self):
         for oid, info in self.op_info.items():
             self.op_by_name.setdefault(info["name"], []).append(oid)
@@ -298,7 +267,6 @@ class DYPODParser:
                 self.station_list.append((info["name"], oid))
         self.station_list.sort(key=lambda x: x[0])
 
-    # ── Dijkstra ───────────────────────────────────────────────────────────────
     def dijkstra(self, start: str, end: str,
                  unelec_penalty_m: float = 0.0) -> tuple[float | None, list]:
         if start not in self.graph:
@@ -325,7 +293,6 @@ class DYPODParser:
                 ))
         return None, []
 
-    # ── Electrification analysis ───────────────────────────────────────────────
     def analyse_electrification(self, start_op: str, end_op: str) -> dict:
         _, p_normal = self.dijkstra(start_op, end_op, 0)
         if not p_normal:
@@ -367,7 +334,6 @@ class DYPODParser:
             has_alternative=has_alt,
         )
 
-    # ── Profile builder ────────────────────────────────────────────────────────
     def build_profile(self, start_op: str, end_op: str,
                       via_ops: list[str] | None = None,
                       unelec_penalty_m: float = 0.0) -> pd.DataFrame | None:
@@ -398,7 +364,6 @@ class DYPODParser:
                 n_tracks        = seg.get("n_tracks", "single"),
             )
 
-        # Pre-compute consecutive NONE-gap ahead of each step
         ue_gap_ahead: list[float] = []
         for i, step in enumerate(all_steps):
             if self.seg_props.get(step["ne_id"], {}).get("electrification", "NONE") != "NONE":
@@ -434,7 +399,6 @@ class DYPODParser:
             ))
             cum_m += seg.get("length_m", 0.0)
 
-        # Final destination row
         last_fwd = all_steps[-1]["forward"]
         last_seg = self.seg_props.get(all_steps[-1]["ne_id"], {})
         last_sd  = _sd(last_seg, last_fwd)
@@ -456,14 +420,10 @@ class DYPODParser:
         df["cum_km"] = df["cum_km"].round(4)
         return df
 
-    # ── Station search ─────────────────────────────────────────────────────────
     def search_stations(self, query: str, max_results: int = 80) -> list[tuple[str, str]]:
-        """Return [(op_id, name)] matching query. Empty query → [] ."""
         q = query.strip().lower()
-        if not q:
-            return []
-        return [(oid, nm) for nm, oid in self.station_list
-                if q in nm.lower()][:max_results]
+        if not q: return []
+        return [(oid, nm) for nm, oid in self.station_list if q in nm.lower()][:max_results]
 
     def op_name(self, op_id: str) -> str:
         return self.op_info.get(op_id, {}).get("name", op_id)
@@ -535,26 +495,12 @@ class TrackProfile:
 #  TRAIN SIMULATOR
 # ─────────────────────────────────────────────────────────────────────────────
 class TrainSimulator:
-    """
-    1-D physics simulation.
-
-    Electric vehicle coasting
-    --------------------------
-    When an electric vehicle enters a non-electrified segment whose
-    consecutive gap length ≤ coast_threshold_m the vehicle coasts:
-      • traction force = 0
-      • no regenerative braking
-      • auxiliary power (HVAC, lighting) still consumed
-      • natural deceleration from Davis resistance + gradient
-    Gaps longer than the threshold raise RuntimeError.
-    """
-
     def __init__(self, mass_kg, length_m, max_power_kw, aux_power_kw,
                  max_accel, max_decel, traction_type, efficiency,
                  coast_threshold_m: float = 500.0):
         self.mass_kg  = mass_kg
-        self.eff_mass = mass_kg * 1.08          # rotational inertia factor
-        self.A, self.B, self.C = 1500.0, 30.0, 4.0   # Davis coefficients
+        self.eff_mass = mass_kg * 1.08
+        self.A, self.B, self.C = 1500.0, 30.0, 4.0
         self.traction   = traction_type
         self.trac_eff   = efficiency if traction_type == "ELECTRIC" else 0.85
         self.regen_eff  = 0.75 if traction_type == "ELECTRIC" else 0.0
@@ -574,15 +520,14 @@ class TrainSimulator:
         total_m = track.total_km * 1000.0
         g = 9.8186
 
-        # Build list of stops to serve
         stops_km:   list[float] = []
         stop_names: list[str]   = []
         for st in track.stations:
             km = st["km"]
-            if km <= 1e-3: # Always skip the starting point
+            if km <= 1e-3:
                 continue
             if km >= track.total_km - 1e-3:
-                continue # We manually append the destination later
+                continue
             will = (st["type"] == "X") or (
                 st["type"] == "R" and (
                     stop_mode == "all" or
@@ -619,25 +564,21 @@ class TrainSimulator:
             electr   = seg.get("electrification", "NONE")
             recup_ok = seg.get("recuperation", 0) == 1
 
-            # ── Electrification guard ──────────────────────────────────────
             coasting = False
             if self.traction == "ELECTRIC" and electr == "NONE":
                 gap_m = seg.get("ue_gap_m", 0.0)
                 if gap_m <= self.coast_threshold_m:
-                    coasting = True          # coast on inertia
+                    coasting = True
                 else:
                     raise RuntimeError(
                         f"⚡ Electric vehicle on non-electrified track at km {km:.2f} "
                         f"(gap {gap_m / 1000:.1f} km > coasting limit "
-                        f"{self.coast_threshold_m / 1000:.1f} km). "
-                        "Raise the coasting limit, enable 'Prefer electrified route', "
-                        "or choose a diesel vehicle."
+                        f"{self.coast_threshold_m / 1000:.1f} km)."
                     )
 
             f_grad    = self.mass_kg * g * slope
             eff_decel = max(0.05, self.max_decel + g * slope)
 
-            # Braking look-ahead for the NEXT upcoming stop
             max_safe = v_lim
             next_stop = next((s for s in stops_km if s >= km - 0.01), None)
             if next_stop is not None:
@@ -653,12 +594,10 @@ class TrainSimulator:
                 hist["regen_kwh"].append(r_j / 3_600_000.0)
                 hist["net_kwh"].append((e_j - r_j) / 3_600_000.0)
 
-            # ── Physics step ───────────────────────────────────────────────
             v_eff  = max(v, 0.5)
             mech_p = reg_p = 0.0
 
             if coasting:
-                # No traction, no regen — pure inertia decay
                 f_res = self._res(v)
                 v     = max(0.0, v - (f_res + f_grad) / self.eff_mass)
 
@@ -689,7 +628,6 @@ class TrainSimulator:
             dist   += v
             t_s    += 1.0
 
-            # ── Dwell at stop ──────────────────────────────────────────────
             if v < 0.5 and any(abs(km - s) <= 0.05 for s in stops_km):
                 v = 0.0
                 if hist is not None:
@@ -709,7 +647,6 @@ class TrainSimulator:
                     e_j += self.aux_w * dwell
                     t_s += dwell
 
-                # Check if we arrived at the final destination
                 if any(abs(track.total_km - s) <= 0.05 for s in stops_km if abs(km - s) <= 0.05):
                     break
 
@@ -761,10 +698,8 @@ def load_xml_from_upload(uploaded) -> str | None:
         with open(zp, "wb") as f:
             f.write(uploaded.read())
         with zipfile.ZipFile(zp) as zf:
-            xmls = [n for n in zf.namelist()
-                    if n.lower().endswith((".xml", ".railml"))]
-            if not xmls:
-                return None
+            xmls = [n for n in zf.namelist() if n.lower().endswith((".xml", ".railml"))]
+            if not xmls: return None
             zf.extract(xmls[0], tmp)
             return os.path.join(tmp, xmls[0])
     path = os.path.join(tmp, uploaded.name)
@@ -772,36 +707,36 @@ def load_xml_from_upload(uploaded) -> str | None:
         f.write(uploaded.read())
     return path
 
-def make_profile_chart(df: pd.DataFrame) -> go.Figure:
-    """
-    Three-panel chart: speed (stepped), gradient (bars), electrification (band).
+def _spd_cell_color(v):
+    lo, hi = 30.0, 160.0
+    t = max(0.0, min(1.0, (float(v) - lo) / (hi - lo)))
+    r = int(220 * (1 - t) + 34 * t)
+    g = int(38  * (1 - t) + 197 * t)
+    b = int(38  * (1 - t) + 94 * t)
+    return f"rgba({r},{g},{b},0.25)"
 
-    Speed uses line_shape='hv' (horizontal-then-vertical step) so the speed
-    is drawn as a true horizontal plateau for the full length of each segment,
-    with an instant vertical drop/rise exactly at the boundary km.  This
-    correctly shows that 160 km/h applies from km 8.9 to km 10.9, then drops
-    to 80 km/h, etc.  A plain linear interpolation would be misleading.
-    """
+def make_profile_chart(df: pd.DataFrame) -> go.Figure:
     total_km = float(df["cum_km"].max())
-    # bar width: cover each segment fully without overlap
-    if len(df) > 1:
-        bar_w = max(float((df["cum_km"].iloc[-1] - df["cum_km"].iloc[0])
-                          / max(len(df) - 1, 1)) * 0.92, 0.005)
-    else:
-        bar_w = 0.5
+
+    mid_km, seg_widths = [], []
+    for i in range(len(df) - 1):
+        x0 = float(df["cum_km"].iloc[i])
+        x1 = float(df["cum_km"].iloc[i + 1])
+        mid_km.append((x0 + x1) / 2)
+        seg_widths.append(max(x1 - x0, 0.001))
+
     stops_x = df[df["stop_type"] == "X"]
     stops_r = df[df["stop_type"] == "R"]
 
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
-        subplot_titles=("Track Speed Limit [km/h]",
+        subplot_titles=("Statutory Track Speed Limit [km/h]",
                         "Gradient [‰]  (↑ uphill  ↓ downhill)",
                         "Electrification"),
         row_heights=[0.48, 0.32, 0.20], vertical_spacing=0.055,
     )
 
-    # ── Speed — STEPPED line (hv = hold current value until next x point) ────
-    # Build hover text with station name where available
+    # ── Speed — STEPPED line
     hover_txt = []
     for _, row in df.iterrows():
         nm = str(row.get("station_name", "")).strip()
@@ -823,7 +758,6 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         hovertemplate=hover_txt,
     ), row=1, col=1)
 
-    # Speed-change markers — tick at each boundary where speed changes
     spd_changes = df[df["speed_kmh"].diff().abs() > 0.5].copy()
     if not spd_changes.empty:
         fig.add_trace(go.Scatter(
@@ -836,10 +770,7 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
             hovertemplate="km %{x:.2f}<br><b>%{y:.0f} km/h</b><extra></extra>",
         ), row=1, col=1)
 
-    # Station X markers — smart thinning to avoid label overlap
-    # Show text labels for every Nth stop based on route density
     n_x = max(len(stops_x), 1)
-    # Target ~20 labelled stops regardless of route length
     label_every = max(1, n_x // 20)
     labelled_x  = stops_x.iloc[::label_every]
     unlabelled_x = stops_x[~stops_x.index.isin(labelled_x.index)]
@@ -848,103 +779,70 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         fig.add_trace(go.Scatter(
             x=labelled_x["cum_km"], y=labelled_x["speed_kmh"],
             mode="markers+text",
-            marker=dict(symbol="diamond", size=9, color=C["accent"],
-                        line=dict(color="white", width=1.5)),
-            text=labelled_x["station_name"],
-            textposition="top center",
-            textfont=dict(size=7, color=C["dark"]),
-            name="Station (X)",
-            hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+            marker=dict(symbol="diamond", size=9, color=C["accent"], line=dict(color="white", width=1.5)),
+            text=labelled_x["station_name"], textposition="top center", textfont=dict(size=7, color=C["dark"]),
+            name="Station (X)", hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
         ), row=1, col=1)
 
     if not unlabelled_x.empty:
         fig.add_trace(go.Scatter(
             x=unlabelled_x["cum_km"], y=unlabelled_x["speed_kmh"],
             mode="markers",
-            marker=dict(symbol="diamond", size=6, color=C["accent"],
-                        line=dict(color="white", width=1)),
-            showlegend=False,
-            text=unlabelled_x["station_name"],
+            marker=dict(symbol="diamond", size=6, color=C["accent"], line=dict(color="white", width=1)),
+            showlegend=False, text=unlabelled_x["station_name"],
             hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
         ), row=1, col=1)
 
-    # Halt R markers — marker only (text too dense on regional lines)
     if not stops_r.empty:
         fig.add_trace(go.Scatter(
             x=stops_r["cum_km"], y=stops_r["speed_kmh"],
             mode="markers",
-            marker=dict(symbol="circle", size=7, color=C["yellow"],
-                        line=dict(color="white", width=1)),
-            name="Halt (R)",
-            text=stops_r["station_name"],
+            marker=dict(symbol="circle", size=7, color=C["yellow"], line=dict(color="white", width=1)),
+            name="Halt (R)", text=stops_r["station_name"],
             hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
         ), row=1, col=1)
 
-    # ── Gradient — stepped fill ────────────────────────────────────────────────
-    pos_g = df["gradient_perm"].clip(lower=0)
-    neg_g = df["gradient_perm"].clip(upper=0)
-    fig.add_trace(go.Scatter(
-        x=df["cum_km"], y=pos_g,
-        mode="lines", name="Uphill",
-        line=dict(color=C["red"], width=0, shape="hv"),
-        fill="tozeroy", fillcolor="rgba(220,38,38,0.55)",
-        hovertemplate="km %{x:.2f}<br>+%{y:.1f} ‰<extra></extra>",
-    ), row=2, col=1)
-    fig.add_trace(go.Scatter(
-        x=df["cum_km"], y=neg_g,
-        mode="lines", name="Downhill",
-        line=dict(color=C["primary"], width=0, shape="hv"),
-        fill="tozeroy", fillcolor="rgba(37,99,235,0.55)",
-        hovertemplate="km %{x:.2f}<br>%{y:.1f} ‰<extra></extra>",
-    ), row=2, col=1)
-
-    # ── Electrification band — one bar per segment, exact width ───────────────
-    mid_km, seg_widths, seg_colors, seg_hover = [], [], [], []
-    for i in range(len(df) - 1):
-        x0 = float(df["cum_km"].iloc[i])
-        x1 = float(df["cum_km"].iloc[i + 1])
-        mid_km.append((x0 + x1) / 2)
-        seg_widths.append(max(x1 - x0, 0.001))
-        seg_colors.append(elec_color(df["electrification"].iloc[i]))
-        seg_hover.append(df["electrification"].iloc[i])
-    if len(df) > 0:
-        mid_km.append(float(df["cum_km"].iloc[-1]))
-        seg_widths.append(0.001)
-        seg_colors.append(elec_color(df["electrification"].iloc[-1]))
-        seg_hover.append(df["electrification"].iloc[-1])
+    # ── Gradient — Solid Bar Fill to eliminate Plotly 0-crossover bugs
+    grads = df["gradient_perm"].iloc[:-1] if len(df) > 1 else df["gradient_perm"]
+    pos_g = grads.clip(lower=0)
+    neg_g = grads.clip(upper=0)
 
     fig.add_trace(go.Bar(
-        x=mid_km, y=[1] * len(mid_km),
-        width=seg_widths,
-        marker_color=seg_colors,
-        name="Electrification",
-        hovertext=seg_hover,
-        hovertemplate="%{hovertext}<br>km %{x:.2f}<extra></extra>",
-        showlegend=False,
+        x=mid_km, y=pos_g, width=seg_widths, marker_color=C["red"], name="Uphill",
+        hovertemplate="km %{x:.2f}<br>+%{y:.1f} ‰<extra></extra>"
+    ), row=2, col=1)
+
+    fig.add_trace(go.Bar(
+        x=mid_km, y=neg_g, width=seg_widths, marker_color=C["primary"], name="Downhill",
+        hovertemplate="km %{x:.2f}<br>%{y:.1f} ‰<extra></extra>"
+    ), row=2, col=1)
+
+    # ── Electrification band
+    elec = df["electrification"].iloc[:-1] if len(df) > 1 else df["electrification"]
+    seg_colors = [elec_color(e) for e in elec]
+    seg_hover = list(elec)
+
+    fig.add_trace(go.Bar(
+        x=mid_km, y=[1] * len(mid_km), width=seg_widths,
+        marker_color=seg_colors, name="Electrification", hovertext=seg_hover,
+        hovertemplate="%{hovertext}<br>km %{x:.2f}<extra></extra>", showlegend=False,
     ), row=3, col=1)
 
-    # Vertical stop lines on speed panel — only for labelled stops
     for _, sr in labelled_x.iterrows():
-        fig.add_vline(x=sr["cum_km"], line_width=0.7, line_dash="dot",
-                      line_color="#CBD5E1", row=1, col=1)
+        fig.add_vline(x=sr["cum_km"], line_width=0.7, line_dash="dot", line_color="#CBD5E1", row=1, col=1)
 
     spd_min = float(df["speed_kmh"].min())
     spd_max = float(df["speed_kmh"].max())
-    spd_lo  = max(0, spd_min * 0.75)   # 25% headroom below min
-    spd_hi  = spd_max * 1.25           # 25% headroom above max for labels
+    spd_lo  = max(0, spd_min * 0.75)
+    spd_hi  = spd_max * 1.25
 
-    fig.update_xaxes(title_text="Distance from departure [km]",
-                     row=3, col=1, gridcolor=C["light"])
-    fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1,
-                     gridcolor=C["light"], range=[spd_lo, spd_hi])
-    fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1,
-                     gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
+    fig.update_xaxes(title_text="Distance from departure [km]", row=3, col=1, gridcolor=C["light"])
+    fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1, gridcolor=C["light"], range=[spd_lo, spd_hi])
+    fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     fig.update_yaxes(showticklabels=False, row=3, col=1, range=[0, 1.1])
     fig.update_layout(
         height=760, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
-                    bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0",
-                    borderwidth=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         margin=dict(t=70, b=10, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
         hovermode="x unified",
@@ -952,14 +850,12 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
     fig.update_xaxes(gridcolor=C["light"], showgrid=True)
     return fig
 
-def make_route_map(df: pd.DataFrame, via_ops: list,
-                   parser: DYPODParser, show_halts: bool = True) -> go.Figure:
-    """Renders the route on an OpenStreetMap base."""
+def make_route_map(df: pd.DataFrame, via_ops: list, parser: DYPODParser, show_halts: bool = True) -> go.Figure:
     map_df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
     fig    = go.Figure()
 
     if not map_df.empty:
-        runs: list[dict] = []   # {electr, lats, lons, hover}
+        runs: list[dict] = []
         cur_electr  = None
         cur_lats:  list = []
         cur_lons:  list = []
@@ -971,11 +867,8 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
             seg_electr = str(row_a["electrification"])
 
             if seg_electr != cur_electr:
-                # Save current run if non-empty
                 if cur_lats:
-                    runs.append(dict(electr=cur_electr,
-                                     lats=cur_lats, lons=cur_lons,
-                                     hover=cur_hover))
+                    runs.append(dict(electr=cur_electr, lats=cur_lats, lons=cur_lons, hover=cur_hover))
                 cur_electr = seg_electr
                 cur_lats   = [float(row_a["lat"])]
                 cur_lons   = [float(row_a["lon"])]
@@ -986,8 +879,7 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
             cur_hover.append(f"{seg_electr}<br>km {row_b['cum_km']:.2f}")
 
         if cur_lats:
-            runs.append(dict(electr=cur_electr,
-                             lats=cur_lats, lons=cur_lons, hover=cur_hover))
+            runs.append(dict(electr=cur_electr, lats=cur_lats, lons=cur_lons, hover=cur_hover))
 
         seen_labels: set = set()
         for run in runs:
@@ -996,84 +888,56 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
             col = elec_color(run["electr"])
             lw  = 5 if run["electr"] != "NONE" else 4
             fig.add_trace(go.Scattermap(
-                lat=run["lats"], lon=run["lons"],
-                mode="lines",
-                line=dict(width=lw, color=col),
-                name=run["electr"],
-                showlegend=show_leg,
-                hovertext=run["hover"],
-                hovertemplate="%{hovertext}<extra></extra>",
+                lat=run["lats"], lon=run["lons"], mode="lines",
+                line=dict(width=lw, color=col), name=run["electr"],
+                showlegend=show_leg, hovertext=run["hover"], hovertemplate="%{hovertext}<extra></extra>",
             ))
 
     if show_halts:
         r_pts = map_df[map_df["stop_type"] == "R"]
         if not r_pts.empty:
             fig.add_trace(go.Scattermap(
-                lat=r_pts["lat"].tolist(), lon=r_pts["lon"].tolist(),
-                mode="markers",
-                marker=dict(size=7, color=C["yellow"]),
-                name="Halt (R)",
-                customdata=r_pts["station_name"].values,
-                hovertemplate="<b>%{customdata}</b><extra></extra>",
+                lat=r_pts["lat"].tolist(), lon=r_pts["lon"].tolist(), mode="markers",
+                marker=dict(size=7, color=C["yellow"]), name="Halt (R)",
+                customdata=r_pts["station_name"].values, hovertemplate="<b>%{customdata}</b><extra></extra>",
             ))
 
     x_pts = map_df[map_df["stop_type"] == "X"]
     if not x_pts.empty:
         fig.add_trace(go.Scattermap(
-            lat=x_pts["lat"].tolist(), lon=x_pts["lon"].tolist(),
-            mode="markers+text",
-            marker=dict(size=11, color=C["accent"]),
-            text=x_pts["station_name"].tolist(), textposition="top right",
-            textfont=dict(size=9, color=C["dark"]),
-            name="Station (X)",
+            lat=x_pts["lat"].tolist(), lon=x_pts["lon"].tolist(), mode="markers+text",
+            marker=dict(size=11, color=C["accent"]), text=x_pts["station_name"].tolist(), textposition="top right",
+            textfont=dict(size=9, color=C["dark"]), name="Station (X)",
             customdata=x_pts[["cum_km", "speed_kmh", "gradient_perm"]].values,
-            hovertemplate=(
-                "<b>%{text}</b><br>"
-                "km %{customdata[0]:.2f}<br>"
-                "%{customdata[1]:.0f} km/h<br>"
-                "grad %{customdata[2]:.1f} ‰"
-                "<extra></extra>"
-            ),
+            hovertemplate=("<b>%{text}</b><br>km %{customdata[0]:.2f}<br>%{customdata[1]:.0f} km/h<br>grad %{customdata[2]:.1f} ‰<extra></extra>"),
         ))
 
     for vid in (via_ops or []):
         info = parser.op_info.get(vid, {})
         if info.get("lat") and info.get("lon"):
             fig.add_trace(go.Scattermap(
-                lat=[info["lat"]], lon=[info["lon"]],
-                mode="markers+text",
-                marker=dict(size=18, color=C["yellow"]),
-                text=[info["name"]], textposition="top right",
-                textfont=dict(size=10, color="#92400E"),
-                name=f"Via: {info['name']}", showlegend=False,
+                lat=[info["lat"]], lon=[info["lon"]], mode="markers+text",
+                marker=dict(size=18, color=C["yellow"]), text=[info["name"]], textposition="top right",
+                textfont=dict(size=10, color="#92400E"), name=f"Via: {info['name']}", showlegend=False,
             ))
 
     if not map_df.empty:
         for row_lat, row_lon, row_name, tpos, col, leg in [
-            (float(map_df["lat"].iloc[0]),  float(map_df["lon"].iloc[0]),
-             map_df["station_name"].iloc[0],  "top right", C["green"], "Departure"),
-            (float(map_df["lat"].iloc[-1]), float(map_df["lon"].iloc[-1]),
-             map_df["station_name"].iloc[-1], "top left",  C["red"],   "Arrival"),
+            (float(map_df["lat"].iloc[0]),  float(map_df["lon"].iloc[0]), map_df["station_name"].iloc[0],  "top right", C["green"], "Departure"),
+            (float(map_df["lat"].iloc[-1]), float(map_df["lon"].iloc[-1]), map_df["station_name"].iloc[-1], "top left",  C["red"],   "Arrival"),
         ]:
             fig.add_trace(go.Scattermap(
-                lat=[row_lat], lon=[row_lon],
-                mode="markers+text",
-                marker=dict(size=20, color=col),
-                text=[row_name], textposition=tpos,
-                textfont=dict(size=11, color=C["dark"],
-                              family="Inter, sans-serif"),
-                name=leg,
-                hovertemplate="<b>%{text}</b><extra></extra>",
+                lat=[row_lat], lon=[row_lon], mode="markers+text", marker=dict(size=20, color=col),
+                text=[row_name], textposition=tpos, textfont=dict(size=11, color=C["dark"], family="Inter, sans-serif"),
+                name=leg, hovertemplate="<b>%{text}</b><extra></extra>",
             ))
 
     lat_c = float(map_df["lat"].mean()) if not map_df.empty else 50.0
     lon_c = float(map_df["lon"].mean()) if not map_df.empty else 15.5
     fig.update_layout(
-        map=dict(style="open-street-map",
-                 center=dict(lat=lat_c, lon=lon_c), zoom=7),
+        map=dict(style="open-street-map", center=dict(lat=lat_c, lon=lon_c), zoom=7),
         height=540, margin=dict(l=0, r=0, t=0, b=0),
-        legend=dict(bgcolor="rgba(255,255,255,0.92)", bordercolor="#E2E8F0",
-                    borderwidth=1, x=0.01, y=0.99, font=dict(size=11)),
+        legend=dict(bgcolor="rgba(255,255,255,0.92)", bordercolor="#E2E8F0", borderwidth=1, x=0.01, y=0.99, font=dict(size=11)),
     )
     return fig
 
@@ -1119,7 +983,6 @@ with st.sidebar:
     st.caption("Czech railway track profile & energy analysis")
     st.markdown("---")
 
-    # ── 1. File ───────────────────────────────────────────────────────────────
     st.markdown('<div class="sec">📂 Load railML</div>', unsafe_allow_html=True)
     uploaded = st.file_uploader(
         "Upload railML or zip", type=["xml", "railml", "zip"],
@@ -1139,8 +1002,7 @@ with st.sidebar:
             glob.glob("/tmp/*.xml") + glob.glob("/tmp/*.railml")
         )
         if local:
-            sel = st.selectbox("Or pick local file", local,
-                               label_visibility="collapsed")
+            sel = st.selectbox("Or pick local file", local, label_visibility="collapsed")
             if sel != st.session_state.xml_path:
                 for k, v in _SS_DEFAULTS.items():
                     st.session_state[k] = v
@@ -1152,8 +1014,7 @@ with st.sidebar:
         if path.lower().endswith(".zip"):
             tmp = tempfile.mkdtemp()
             with zipfile.ZipFile(path) as zf:
-                xmls = [n for n in zf.namelist()
-                        if n.lower().endswith((".xml", ".railml"))]
+                xmls = [n for n in zf.namelist() if n.lower().endswith((".xml", ".railml"))]
                 zf.extract(xmls[0], tmp)
                 path = os.path.join(tmp, xmls[0])
         return DYPODParser(path)
@@ -1175,11 +1036,9 @@ with st.sidebar:
         st.info("Upload a DYPOD railML file to begin.")
         st.stop()
 
-    # ── 2. Route with live search suggestions ─────────────────────────────────
     st.markdown('<div class="sec">🗺️ Route</div>', unsafe_allow_html=True)
 
     def _station_selector(label: str, key_q: str, key_sel: str) -> str | None:
-        """Text input + filtered selectbox."""
         query = st.text_input(label, key=key_q, placeholder="Type to search…")
         results = parser.search_stations(query)
         if not results:
@@ -1197,27 +1056,16 @@ with st.sidebar:
     op_end   = _station_selector("🔍 Arrival station",   "q_arr", "sel_arr")
 
     st.markdown("**⚡ Electrified route preference**")
-    elec_reroute = st.toggle(
-        "Prefer electrified track", value=False,
-        help="Adds a cost penalty to non-electrified segments so the router "
-             "finds an all-electric path where possible.",
-    )
+    elec_reroute = st.toggle("Prefer electrified track", value=False)
     pen_km = 100
     if elec_reroute:
-        pen_km = st.slider(
-            "Detour tolerance (km per NONE segment)", 10, 500, 100, 10,
-            help="How many extra km are acceptable to avoid 1 non-electrified segment.",
-        )
+        pen_km = st.slider("Detour tolerance (km per NONE segment)", 10, 500, 100, 10)
 
-    btn_profile = st.button(
-        "🗺️  Build Track Profile", use_container_width=True, type="primary",
-        disabled=not (op_start and op_end and op_start != op_end),
-    )
+    btn_profile = st.button("🗺️  Build Track Profile", use_container_width=True, type="primary",
+                            disabled=not (op_start and op_end and op_start != op_end))
 
-    # ── 3. Vehicle ────────────────────────────────────────────────────────────
     st.markdown('<div class="sec">🚃 Vehicle</div>', unsafe_allow_html=True)
-    veh = st.selectbox("Preset", ["Custom"] + list(PREDEFINED_VEHICLES.keys()),
-                       label_visibility="collapsed")
+    veh = st.selectbox("Preset", ["Custom"] + list(PREDEFINED_VEHICLES.keys()), label_visibility="collapsed")
     if veh == "Custom":
         traction   = st.selectbox("Traction", ["DIESEL", "ELECTRIC"])
         cv1, cv2   = st.columns(2)
@@ -1237,15 +1085,10 @@ with st.sidebar:
         diesel_d = 10.0
     unit_lbl = "L fuel" if traction == "DIESEL" else "kWh"
 
-    # ── 4. Simulation ──────────────────────────────────────────────────────────
     st.markdown('<div class="sec">⚙️ Simulation</div>', unsafe_allow_html=True)
     dwell     = st.number_input("Station dwell (s)", value=30, step=5)
-    stop_mode = st.radio(
-        "Stop mode",
-        options=["all", "random", "none"],
-        format_func={"all": "All stops", "random": "Stochastic", "none": "Express"}.get,
-        horizontal=True,
-    )
+    stop_mode = st.radio("Stop mode", options=["all", "random", "none"],
+                         format_func={"all": "All stops", "random": "Stochastic", "none": "Express"}.get, horizontal=True)
     stop_prob = 1.0
     if stop_mode == "random":
         stop_prob = st.slider("Request-stop probability", 0.0, 1.0, 0.5, 0.05)
@@ -1253,29 +1096,16 @@ with st.sidebar:
     coast_threshold_m = 500.0
     if traction == "ELECTRIC":
         st.markdown("**⚡ Electric coasting**")
-        coast_km = st.slider(
-            "Max coastable non-electrified gap (km)", 0.1, 10.0, 0.5, 0.1,
-            help="Electric vehicles coast (no traction, aux only) through "
-                 "non-electrified gaps shorter than this. Reflects real-world "
-                 "pantograph-down coasting through neutral sections or "
-                 "short construction detours.",
-        )
+        coast_km = st.slider("Max coastable non-electrified gap (km)", 0.1, 10.0, 0.5, 0.1)
         coast_threshold_m = coast_km * 1000.0
 
-    # ── 5. Monte Carlo ─────────────────────────────────────────────────────────
     st.markdown('<div class="sec">🎲 Monte Carlo</div>', unsafe_allow_html=True)
     mc_n     = st.number_input("Runs per probability", 20, 500, 100, 10)
-    mc_probs = st.multiselect(
-        "Probabilities to sweep",
-        options=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0],
-        default=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0],
-    )
+    mc_probs = st.multiselect("Probabilities to sweep", options=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0], default=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
 
     cb1, cb2 = st.columns(2)
-    btn_run = cb1.button("▶️ Run",  use_container_width=True,
-                          disabled=st.session_state.profile_df is None)
-    btn_mc  = cb2.button("🎲 MC",   use_container_width=True,
-                          disabled=st.session_state.profile_df is None)
+    btn_run = cb1.button("▶️ Run",  use_container_width=True, disabled=st.session_state.profile_df is None)
+    btn_mc  = cb2.button("🎲 MC",   use_container_width=True, disabled=st.session_state.profile_df is None)
 
 
 # ─── Actions ─────────────────────────────────────────────────────────────────
@@ -1287,13 +1117,10 @@ if btn_profile and op_start and op_end:
                                    via_ops=st.session_state.via_ops or [],
                                    unelec_penalty_m=pen)
     if df is None or df.empty:
-        st.error("No path found between the selected stations. "
-                 "They may not be connected in this export.")
+        st.error("No path found between the selected stations. They may not be connected in this export.")
     else:
-        st.session_state.update(
-            profile_df=df, op_start=op_start, op_end=op_end,
-            elec_analysis=ea, rep_result=None, mc_result=None,
-        )
+        st.session_state.update(profile_df=df, op_start=op_start, op_end=op_end,
+                                elec_analysis=ea, rep_result=None, mc_result=None)
 
 if btn_run and st.session_state.profile_df is not None:
     with st.spinner("Running physics simulation…"):
@@ -1302,10 +1129,8 @@ if btn_run and st.session_state.profile_df is not None:
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
                                    coast_threshold_m=coast_threshold_m)
-            hist, snames, stats = sim.run(
-                track, stop_mode=stop_mode, stop_prob=stop_prob,
-                dwell=dwell, record=True,
-            )
+            hist, snames, stats = sim.run(track, stop_mode=stop_mode, stop_prob=stop_prob,
+                                          dwell=dwell, record=True)
             st.session_state.rep_result = dict(
                 hist=hist, stop_names=snames, stats=stats,
                 traction=traction, diesel_d=diesel_d, efficiency=efficiency,
@@ -1316,44 +1141,43 @@ if btn_run and st.session_state.profile_df is not None:
             st.error(str(e))
 
 if btn_mc and st.session_state.profile_df is not None and mc_probs:
-    try:
-        track = TrackProfile(st.session_state.profile_df)
-        sim   = TrainSimulator(mass, length, power, aux_power,
-                               accel, decel, traction, efficiency,
-                               coast_threshold_m=coast_threshold_m)
-        rows_mc = []
+    with st.spinner(f"Monte Carlo — {int(mc_n)} × {len(mc_probs)} probabilities…"):
+        try:
+            track = TrackProfile(st.session_state.profile_df)
+            sim   = TrainSimulator(mass, length, power, aux_power,
+                                   accel, decel, traction, efficiency,
+                                   coast_threshold_m=coast_threshold_m)
+            rows_mc = []
 
-        # Interactive Progress Bar so the UI doesn't silently freeze
-        prog_bar = st.progress(0.0, text="Initializing Monte Carlo Engine...")
-        total_runs = len(mc_probs) * int(mc_n)
-        completed_runs = 0
+            prog_bar = st.progress(0.0, text="Initializing Monte Carlo Engine...")
+            total_runs = len(mc_probs) * int(mc_n)
+            completed_runs = 0
 
-        for p_val in sorted(mc_probs, reverse=True):
-            sm = ("all" if p_val == 1.0 else "none" if p_val == 0.0 else "random")
-            e_list, t_list = [], []
-            for _ in range(int(mc_n)):
-                _, _, st_ = sim.run(track, sm, p_val, dwell)
-                e_list.append(to_unit(st_, traction, diesel_d, efficiency))
-                t_list.append(st_["journey_time_s"])
+            for p_val in sorted(mc_probs, reverse=True):
+                sm = ("all" if p_val == 1.0 else "none" if p_val == 0.0 else "random")
+                e_list, t_list = [], []
+                for _ in range(int(mc_n)):
+                    _, _, st_ = sim.run(track, sm, p_val, dwell)
+                    e_list.append(to_unit(st_, traction, diesel_d, efficiency))
+                    t_list.append(st_["journey_time_s"])
+                    completed_runs += 1
+                    if completed_runs % max(1, total_runs // 20) == 0:
+                        prog_bar.progress(completed_runs / total_runs, text=f"Computing permutations ({completed_runs}/{total_runs})")
 
-                completed_runs += 1
-                if completed_runs % max(1, total_runs // 20) == 0:
-                    prog_bar.progress(completed_runs / total_runs, text=f"Computing permutations ({completed_runs}/{total_runs})")
+                rows_mc.append(dict(
+                    prob=f"{int(p_val * 100)}%", p_num=p_val,
+                    mean_e=np.mean(e_list),  std_e=np.std(e_list),
+                    min_e=np.min(e_list),    max_e=np.max(e_list),
+                    mean_t=np.mean(t_list),  min_t=np.min(t_list), max_t=np.max(t_list),
+                ))
+            prog_bar.empty()
 
-            rows_mc.append(dict(
-                prob=f"{int(p_val * 100)}%", p_num=p_val,
-                mean_e=np.mean(e_list),  std_e=np.std(e_list),
-                min_e=np.min(e_list),    max_e=np.max(e_list),
-                mean_t=np.mean(t_list),  min_t=np.min(t_list), max_t=np.max(t_list),
-            ))
-        prog_bar.empty()
-
-        mc_df = pd.DataFrame(rows_mc)
-        mc_df["savings"] = (mc_df["mean_e"].max() - mc_df["mean_e"]).clip(lower=0)
-        mc_df["unit"]    = unit_lbl
-        st.session_state.mc_result = mc_df
-    except RuntimeError as e:
-        st.error(str(e))
+            mc_df = pd.DataFrame(rows_mc)
+            mc_df["savings"] = (mc_df["mean_e"].max() - mc_df["mean_e"]).clip(lower=0)
+            mc_df["unit"]    = unit_lbl
+            st.session_state.mc_result = mc_df
+        except RuntimeError as e:
+            st.error(str(e))
 
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
@@ -1363,7 +1187,7 @@ tab_prof, tab_edit, tab_run_t, tab_mc_t = st.tabs([
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TAB 1 – TRACK PROFILE (INFRASTRUCTURE LIMITS)
+#  TAB 1 – TRACK PROFILE
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_prof:
     df  = st.session_state.profile_df
@@ -1371,11 +1195,7 @@ with tab_prof:
 
     if df is None:
         st.markdown("### 👈 Search for stations in the sidebar and click **Build Track Profile**")
-        st.info(
-            "The tool stitches meso-level railML segments into a direction-aware "
-            "track profile including speed limits (per-direction minimum across all "
-            "track sub-elements), gradient, electrification, and GPS coordinates."
-        )
+        st.info("The tool stitches meso-level railML segments into a direction-aware track profile.")
         st.stop()
 
     total_km = float(df["cum_km"].max())
@@ -1423,10 +1243,8 @@ with tab_prof:
     ), unsafe_allow_html=True)
     st.write("")
 
-    # Main chart
     st.plotly_chart(make_profile_chart(df), use_container_width=True)
 
-    # Electrification legend badges
     badges = ""
     for sys in df["electrification"].unique():
         col   = elec_color(sys)
@@ -1438,7 +1256,6 @@ with tab_prof:
     st.markdown(badges, unsafe_allow_html=True)
     st.write("")
 
-    # Map
     map_df = df.dropna(subset=["lat", "lon"])
     if not map_df.empty:
         with st.expander("🗺️ Route map", expanded=True):
@@ -1447,7 +1264,6 @@ with tab_prof:
                 use_container_width=True,
             )
 
-    # Gradient stats + histogram
     with st.expander("📐 Gradient statistics"):
         g_vals = df["gradient_perm"]
         gc1, gc2 = st.columns([2, 1])
@@ -1473,23 +1289,15 @@ with tab_prof:
             st.metric("RMS gradient", f"{(g_vals**2).mean()**0.5:.1f} ‰")
             st.metric("Mean",         f"{g_vals.mean():.1f} ‰")
 
-    # Speed profile summary — pure Plotly, no matplotlib dependency
     with st.expander("⚡ Speed profile summary"):
         spd_df = df[["cum_km", "station_name", "speed_kmh", "gradient_perm",
                       "electrification", "n_tracks", "stop_type"]].copy()
         spd_df = spd_df[spd_df["station_name"].str.strip().ne("")].reset_index(drop=True)
 
-        def _spd_cell_color(v):
-            lo, hi = 30.0, 160.0
-            t = max(0.0, min(1.0, (float(v) - lo) / (hi - lo)))
-            r = int(220 * (1 - t) + 34 * t)
-            g = int(38  * (1 - t) + 197 * t)
-            b = int(38  * (1 - t) + 94 * t)
-            return f"rgba({r},{g},{b},0.25)"
-
         stop_icons = spd_df["stop_type"].map({"X": "🚉", "R": "🛑"}).fillna("")
         labels = stop_icons + " " + spd_df["station_name"].str.strip()
 
+        # Fixed logic: Avoid dynamic alpha colors that crash Plotly Tables
         fig_tbl = go.Figure(go.Table(
             columnwidth=[60, 200, 80, 70, 160, 70],
             header=dict(
@@ -1512,7 +1320,7 @@ with tab_prof:
                     ["#F8FAFC"] * len(spd_df),
                     [_spd_cell_color(v) for v in spd_df["speed_kmh"]],
                     ["#F8FAFC"] * len(spd_df),
-                    [elec_color(e) + "44" for e in spd_df["electrification"]],
+                    ["#F8FAFC"] * len(spd_df), # Avoided dynamic text coloring
                     ["#F8FAFC"] * len(spd_df),
                 ],
                 font=dict(size=11), align="left", height=24,
@@ -1524,7 +1332,6 @@ with tab_prof:
         )
         st.plotly_chart(fig_tbl, use_container_width=True)
 
-    # Full data table
     with st.expander("📋 Full profile data table"):
         cols = ["cum_km", "station_name", "stop_type", "speed_kmh",
                 "gradient_perm", "electrification", "recuperation",
@@ -1549,7 +1356,6 @@ with tab_edit:
     st.markdown("### ✏️ Interactive Profile Editor")
     df = st.session_state.profile_df
 
-    # Via waypoints
     st.markdown('<div class="sec">📍 Via Waypoints</div>', unsafe_allow_html=True)
     st.caption("Force the route through specific intermediate stations. "
                "Rebuild the profile after adding or removing waypoints.")
@@ -1595,7 +1401,6 @@ with tab_edit:
     else:
         st.markdown('<div class="info-box">No via-waypoints set. The router uses the direct shortest path.</div>', unsafe_allow_html=True)
 
-    # Editable overrides
     if df is not None:
         st.markdown('<div class="sec">📝 Speed & Stop Overrides</div>', unsafe_allow_html=True)
         st.caption(
@@ -1674,7 +1479,6 @@ with tab_run_t:
             subplot_titles=("Simulated Train Speed [km/h]", "Cumulative Energy [kWh]"),
             vertical_spacing=0.10, row_heights=[0.55, 0.45],
         )
-        # Note for long routes:
         if tot_km > 30:
             st.caption("🔍 **Tip:** On routes longer than 30km, the acceleration/braking curves might appear vertically squashed. Drag a box over the chart to zoom in and see the detailed train kinematics.")
 
@@ -1807,7 +1611,6 @@ with tab_mc_t:
 
     st.caption(f"N = {int(mc_n)} simulation runs per probability level")
 
-    # Summary table
     disp = mc_df.copy()
     disp["Mean time"] = disp["mean_t"].apply(fmt_dur)
     disp["Fastest"]   = disp["min_t"].apply(fmt_dur)
@@ -1829,7 +1632,6 @@ with tab_mc_t:
                         "mc_results.csv", "text/csv")
     st.markdown("---")
 
-    # Charts
     mc1, mc2 = st.columns(2)
 
     with mc1:
@@ -1885,7 +1687,6 @@ with tab_mc_t:
         )
         st.plotly_chart(fig_err, use_container_width=True)
 
-    # Journey time
     fig_t = go.Figure()
     fig_t.add_trace(go.Scatter(
         x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
