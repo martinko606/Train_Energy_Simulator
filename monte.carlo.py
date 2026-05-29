@@ -747,10 +747,24 @@ def load_xml_from_upload(uploaded) -> str | None:
     return path
 
 def make_profile_chart(df: pd.DataFrame) -> go.Figure:
+    """
+    Three-panel chart: speed (stepped), gradient (bars), electrification (band).
+
+    Speed uses line_shape='hv' (horizontal-then-vertical step) so the speed
+    is drawn as a true horizontal plateau for the full length of each segment,
+    with an instant vertical drop/rise exactly at the boundary km.  This
+    correctly shows that 160 km/h applies from km 8.9 to km 10.9, then drops
+    to 80 km/h, etc.  A plain linear interpolation would be misleading.
+    """
     total_km = float(df["cum_km"].max())
-    bar_w    = max(total_km / max(len(df), 1) * 0.85, 0.01)
-    stops_x  = df[df["stop_type"] == "X"]
-    stops_r  = df[df["stop_type"] == "R"]
+    # bar width: cover each segment fully without overlap
+    if len(df) > 1:
+        bar_w = max(float((df["cum_km"].iloc[-1] - df["cum_km"].iloc[0])
+                          / max(len(df) - 1, 1)) * 0.92, 0.005)
+    else:
+        bar_w = 0.5
+    stops_x = df[df["stop_type"] == "X"]
+    stops_r = df[df["stop_type"] == "R"]
 
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
@@ -760,20 +774,48 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         row_heights=[0.48, 0.32, 0.20], vertical_spacing=0.055,
     )
 
-    # Speed fill
+    # ── Speed — STEPPED line (hv = hold current value until next x point) ────
+    # Build hover text with station name where available
+    hover_txt = []
+    for _, row in df.iterrows():
+        nm = str(row.get("station_name", "")).strip()
+        stype = str(row.get("stop_type", "")).strip()
+        tag = f"<b>{nm}</b><br>" if nm and nm != "nan" else ""
+        stop_tag = {"X": " 🚉", "R": " 🛑"}.get(stype, "")
+        hover_txt.append(
+            f"{tag}km {row['cum_km']:.2f}{stop_tag}<br>"
+            f"{row['speed_kmh']:.0f} km/h<br>"
+            f"Grad: {row['gradient_perm']:.1f} ‰<br>"
+            f"{row['electrification']}<extra></extra>"
+        )
+
     fig.add_trace(go.Scatter(
         x=df["cum_km"], y=df["speed_kmh"],
         mode="lines", name="Speed limit",
-        line=dict(color=C["primary"], width=2.5),
+        line=dict(color=C["primary"], width=2.5, shape="hv"),
         fill="tozeroy", fillcolor=C["bg_blue"],
+        hovertemplate=hover_txt,
     ), row=1, col=1)
+
+    # Speed-change annotations: mark every boundary where speed changes
+    spd_changes = df[df["speed_kmh"].diff().abs() > 0.5].copy()
+    if not spd_changes.empty and len(spd_changes) <= 40:
+        fig.add_trace(go.Scatter(
+            x=spd_changes["cum_km"], y=spd_changes["speed_kmh"],
+            mode="markers",
+            marker=dict(symbol="line-ns", size=10, color=C["primary"],
+                        line=dict(color=C["primary"], width=2)),
+            name="Speed change",
+            showlegend=False,
+            hovertemplate="km %{x:.2f}<br><b>%{y:.0f} km/h</b><extra></extra>",
+        ), row=1, col=1)
 
     # Station X markers
     if not stops_x.empty:
         fig.add_trace(go.Scatter(
             x=stops_x["cum_km"], y=stops_x["speed_kmh"],
             mode="markers+text",
-            marker=dict(symbol="diamond", size=9, color=C["accent"],
+            marker=dict(symbol="diamond", size=10, color=C["accent"],
                         line=dict(color="white", width=1.5)),
             text=stops_x["station_name"], textposition="top center",
             textfont=dict(size=7, color=C["dark"]),
@@ -786,7 +828,7 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         fig.add_trace(go.Scatter(
             x=stops_r["cum_km"], y=stops_r["speed_kmh"],
             mode="markers+text",
-            marker=dict(symbol="circle", size=7, color=C["yellow"],
+            marker=dict(symbol="circle", size=8, color=C["yellow"],
                         line=dict(color="white", width=1)),
             text=stops_r["station_name"], textposition="top center",
             textfont=dict(size=6.5, color="#78350F"),
@@ -794,93 +836,188 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
             hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
         ), row=1, col=1)
 
-    # Gradient bars
-    fig.add_trace(go.Bar(
-        x=df["cum_km"], y=df["gradient_perm"].clip(lower=0),
-        name="Uphill", marker_color=C["red"], width=bar_w,
+    # ── Gradient — stepped bars ───────────────────────────────────────────────
+    # Use Scatter with shape="hv" and fill for a clean step profile
+    pos_g = df["gradient_perm"].clip(lower=0)
+    neg_g = df["gradient_perm"].clip(upper=0)
+    fig.add_trace(go.Scatter(
+        x=df["cum_km"], y=pos_g,
+        mode="lines", name="Uphill",
+        line=dict(color=C["red"], width=0, shape="hv"),
+        fill="tozeroy", fillcolor="rgba(220,38,38,0.55)",
         hovertemplate="km %{x:.2f}<br>+%{y:.1f} ‰<extra></extra>",
     ), row=2, col=1)
-    fig.add_trace(go.Bar(
-        x=df["cum_km"], y=df["gradient_perm"].clip(upper=0),
-        name="Downhill", marker_color=C["primary"], width=bar_w,
+    fig.add_trace(go.Scatter(
+        x=df["cum_km"], y=neg_g,
+        mode="lines", name="Downhill",
+        line=dict(color=C["primary"], width=0, shape="hv"),
+        fill="tozeroy", fillcolor="rgba(37,99,235,0.55)",
         hovertemplate="km %{x:.2f}<br>%{y:.1f} ‰<extra></extra>",
     ), row=2, col=1)
 
-    # Electrification band
+    # ── Electrification — coloured segment band ───────────────────────────────
+    # Build explicit segment rectangles: for each row i, a bar from cum_km[i]
+    # to cum_km[i+1], coloured by electrification[i].
+    # Using a Bar trace with x=midpoint and width=segment_length gives correct colouring.
+    mid_km, seg_widths, seg_colors, seg_hover = [], [], [], []
+    for i in range(len(df) - 1):
+        x0 = float(df["cum_km"].iloc[i])
+        x1 = float(df["cum_km"].iloc[i + 1])
+        mid_km.append((x0 + x1) / 2)
+        seg_widths.append(max(x1 - x0, 0.001))
+        seg_colors.append(elec_color(df["electrification"].iloc[i]))
+        seg_hover.append(df["electrification"].iloc[i])
+    # Add final row as zero-width sentinel
+    if len(df) > 0:
+        mid_km.append(float(df["cum_km"].iloc[-1]))
+        seg_widths.append(0.001)
+        seg_colors.append(elec_color(df["electrification"].iloc[-1]))
+        seg_hover.append(df["electrification"].iloc[-1])
+
     fig.add_trace(go.Bar(
-        x=df["cum_km"], y=[1] * len(df),
-        marker_color=[elec_color(e) for e in df["electrification"]],
+        x=mid_km, y=[1] * len(mid_km),
+        width=seg_widths,
+        marker_color=seg_colors,
         name="Electrification",
-        hovertext=df["electrification"],
+        hovertext=seg_hover,
         hovertemplate="%{hovertext}<br>km %{x:.2f}<extra></extra>",
-        width=bar_w, showlegend=False,
+        showlegend=False,
     ), row=3, col=1)
 
-    # Vertical stop lines
+    # Vertical stop lines on speed panel
     for _, sr in stops_x.iterrows():
-        fig.add_vline(x=sr["cum_km"], line_width=0.7, line_dash="dot",
+        fig.add_vline(x=sr["cum_km"], line_width=0.8, line_dash="dot",
                       line_color="#CBD5E1", row=1, col=1)
 
-    fig.update_xaxes(title_text="Distance from departure [km]", row=3, col=1,
-                     gridcolor=C["light"])
-    fig.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, gridcolor=C["light"])
-    fig.update_yaxes(title_text="Gradient [‰]",  row=2, col=1, gridcolor=C["light"],
-                     zeroline=True, zerolinecolor="#CBD5E1")
-    fig.update_yaxes(showticklabels=False, row=3, col=1)
+    fig.update_xaxes(title_text="Distance from departure [km]",
+                     row=3, col=1, gridcolor=C["light"])
+    fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1,
+                     gridcolor=C["light"], rangemode="tozero")
+    fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1,
+                     gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
+    fig.update_yaxes(showticklabels=False, row=3, col=1, range=[0, 1.1])
     fig.update_layout(
-        height=720, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
+        height=740, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
-                    bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
+                    bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0",
+                    borderwidth=1),
         margin=dict(t=70, b=10, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
+        hovermode="x unified",
     )
     fig.update_xaxes(gridcolor=C["light"], showgrid=True)
     return fig
 
 def make_route_map(df: pd.DataFrame, via_ops: list,
                    parser: DYPODParser, show_halts: bool = True) -> go.Figure:
-    map_df = df.dropna(subset=["lat", "lon"])
+    """
+    Renders the route on an OpenStreetMap base.
+
+    Map colouring fix
+    -----------------
+    The old approach grouped all rows by electrification value and drew one
+    Scattermap trace per group.  Scattermap mode="lines" connects every point
+    in the trace in order — so if a NONE segment sits between two electrified
+    segments, the three points end up in two different traces and the
+    electrification grouping draws the NONE colour only as a short isolated
+    stub between the electrified segments, effectively invisible.
+
+    The fix: build one trace per CONTIGUOUS run of the same electrification
+    (using None-separator segments), so each uninterrupted stretch of the same
+    system is a single line, and every segment is correctly coloured regardless
+    of whether it is isolated or part of a long stretch.
+    """
+    map_df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
     fig    = go.Figure()
 
-    # Route line coloured by electrification
-    for sys in df["electrification"].unique():
-        seg = map_df[map_df["electrification"] == sys]
-        if seg.empty:
-            continue
-        fig.add_trace(go.Scattermap(
-            lat=seg["lat"], lon=seg["lon"], mode="lines",
-            line=dict(width=5, color=elec_color(sys)),
-            name=sys,
-            hovertemplate=f"{sys}<extra></extra>",
-        ))
+    if not map_df.empty:
+        # Build contiguous runs of the same electrification system.
+        # Each run becomes one Scattermap trace with None separators between
+        # non-adjacent pairs (there are none within a run, but we add the
+        # closing point for the last segment of each run).
+        runs: list[dict] = []   # {electr, lats, lons, hover}
+        cur_electr  = None
+        cur_lats:  list = []
+        cur_lons:  list = []
+        cur_hover: list = []
 
-    # Request halts (R)
+        for i in range(len(map_df) - 1):
+            row_a = map_df.iloc[i]
+            row_b = map_df.iloc[i + 1]
+            seg_electr = str(row_a["electrification"])
+
+            if seg_electr != cur_electr:
+                # Save current run if non-empty
+                if cur_lats:
+                    runs.append(dict(electr=cur_electr,
+                                     lats=cur_lats, lons=cur_lons,
+                                     hover=cur_hover))
+                cur_electr = seg_electr
+                cur_lats   = [float(row_a["lat"])]
+                cur_lons   = [float(row_a["lon"])]
+                cur_hover  = [f"{seg_electr}<br>km {row_a['cum_km']:.2f}"]
+
+            cur_lats.append(float(row_b["lat"]))
+            cur_lons.append(float(row_b["lon"]))
+            cur_hover.append(f"{seg_electr}<br>km {row_b['cum_km']:.2f}")
+
+        # Flush last run
+        if cur_lats:
+            runs.append(dict(electr=cur_electr,
+                             lats=cur_lats, lons=cur_lons, hover=cur_hover))
+
+        # Draw one trace per run (each is a contiguous same-electrification stretch)
+        seen_labels: set = set()
+        for run in runs:
+            show_leg = run["electr"] not in seen_labels
+            seen_labels.add(run["electr"])
+            col = elec_color(run["electr"])
+            # Line width: thicker for electrified, slightly thinner for NONE
+            lw  = 5 if run["electr"] != "NONE" else 4
+            fig.add_trace(go.Scattermap(
+                lat=run["lats"], lon=run["lons"],
+                mode="lines",
+                line=dict(width=lw, color=col),
+                name=run["electr"],
+                showlegend=show_leg,
+                hovertext=run["hover"],
+                hovertemplate="%{hovertext}<extra></extra>",
+            ))
+
+    # Request halts (R) — small yellow dots
     if show_halts:
         r_pts = map_df[map_df["stop_type"] == "R"]
         if not r_pts.empty:
             fig.add_trace(go.Scattermap(
-                lat=r_pts["lat"], lon=r_pts["lon"], mode="markers",
+                lat=r_pts["lat"].tolist(), lon=r_pts["lon"].tolist(),
+                mode="markers",
                 marker=dict(size=7, color=C["yellow"]),
                 name="Halt (R)",
                 customdata=r_pts["station_name"].values,
                 hovertemplate="<b>%{customdata}</b><extra></extra>",
             ))
 
-    # Mandatory stations (X)
+    # Mandatory stations (X) — orange diamonds with labels
     x_pts = map_df[map_df["stop_type"] == "X"]
     if not x_pts.empty:
         fig.add_trace(go.Scattermap(
-            lat=x_pts["lat"], lon=x_pts["lon"],
+            lat=x_pts["lat"].tolist(), lon=x_pts["lon"].tolist(),
             mode="markers+text",
             marker=dict(size=11, color=C["accent"]),
-            text=x_pts["station_name"], textposition="top right",
+            text=x_pts["station_name"].tolist(), textposition="top right",
             textfont=dict(size=9, color=C["dark"]),
             name="Station (X)",
-            customdata=x_pts[["cum_km"]].values,
-            hovertemplate="<b>%{text}</b><br>km %{customdata[0]:.2f}<extra></extra>",
+            customdata=x_pts[["cum_km", "speed_kmh", "gradient_perm"]].values,
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                "km %{customdata[0]:.2f}<br>"
+                "%{customdata[1]:.0f} km/h<br>"
+                "grad %{customdata[2]:.1f} ‰"
+                "<extra></extra>"
+            ),
         ))
 
-    # Via waypoints
+    # Via waypoints — large yellow pins
     for vid in (via_ops or []):
         info = parser.op_info.get(vid, {})
         if info.get("lat") and info.get("lon"):
@@ -893,13 +1030,13 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
                 name=f"Via: {info['name']}", showlegend=False,
             ))
 
-    # Start (green) and End (red) markers — separate traces to avoid
-    # list-valued textposition (which plotly rejects for Scattermap)
+    # Departure (green) and Arrival (red) — MUST be separate traces,
+    # Scattermap rejects list-valued textposition.
     if not map_df.empty:
         for row_lat, row_lon, row_name, tpos, col, leg in [
-            (map_df["lat"].iloc[0],  map_df["lon"].iloc[0],
+            (float(map_df["lat"].iloc[0]),  float(map_df["lon"].iloc[0]),
              map_df["station_name"].iloc[0],  "top right", C["green"], "Departure"),
-            (map_df["lat"].iloc[-1], map_df["lon"].iloc[-1],
+            (float(map_df["lat"].iloc[-1]), float(map_df["lon"].iloc[-1]),
              map_df["station_name"].iloc[-1], "top left",  C["red"],   "Arrival"),
         ]:
             fig.add_trace(go.Scattermap(
@@ -907,7 +1044,8 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
                 mode="markers+text",
                 marker=dict(size=20, color=col),
                 text=[row_name], textposition=tpos,
-                textfont=dict(size=11, color=C["dark"], family="Inter, sans-serif"),
+                textfont=dict(size=11, color=C["dark"],
+                              family="Inter, sans-serif"),
                 name=leg,
                 hovertemplate="<b>%{text}</b><extra></extra>",
             ))
@@ -917,7 +1055,7 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
     fig.update_layout(
         map=dict(style="open-street-map",
                  center=dict(lat=lat_c, lon=lon_c), zoom=7),
-        height=520, margin=dict(l=0, r=0, t=0, b=0),
+        height=540, margin=dict(l=0, r=0, t=0, b=0),
         legend=dict(bgcolor="rgba(255,255,255,0.92)", bordercolor="#E2E8F0",
                     borderwidth=1, x=0.01, y=0.99, font=dict(size=11)),
     )
@@ -1482,7 +1620,8 @@ with tab_run_t:
         )
         fig3.add_trace(go.Scatter(
             x=hist["km"], y=hist["v_limit_kmh"], name="Speed limit",
-            line=dict(color=C["red"], dash="dot", width=1.8)), row=1, col=1)
+            line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")),
+            row=1, col=1)
         fig3.add_trace(go.Scatter(
             x=hist["km"], y=hist["v_kmh"], name="Actual speed",
             line=dict(color=C["primary"], width=2.5),
