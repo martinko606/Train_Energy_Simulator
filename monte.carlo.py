@@ -23,29 +23,29 @@ RAILML_ZIP_PATH = "railML_export_20251214_20260414.zip"
 PREDEFINED_VEHICLES = {
     "EDITA": {
         "traction": "DIESEL", "mass": 22000, "length": 15,
-        "power": 152, "aux_power": 20, "accel": 0.5, "decel": 0.8,
+        "power": 250, "aux_power": 20, "accel": 0.5, "decel": 0.8,
         "efficiency": 0.30
     },
     "EDITA+Btax": {
         "traction": "DIESEL", "mass": 42000, "length": 30,
-        "power": 152, "aux_power": 25, "accel": 0.4, "decel": 0.8,
+        "power": 250, "aux_power": 25, "accel": 0.4, "decel": 0.8,
         "efficiency": 0.30
     },
-    "RegioNova (Class 814)": {
-        "traction": "DIESEL", "mass": 80000, "length": 44,
-        "power": 485, "aux_power": 20, "accel": 0.5, "decel": 0.8,
-        "efficiency": 0.32
-    },
-    "Stadler RS1 (Class 840)": {
-        "traction": "DIESEL", "mass": 50000, "length": 25.5,
-        "power": 514, "aux_power": 25, "accel": 0.8, "decel": 0.9,
-        "efficiency": 0.38
-    },
-    "CityElefant (Class 471)": {
-        "traction": "ELECTRIC", "mass": 155000, "length": 79,
-        "power": 2000, "aux_power": 80, "accel": 0.8, "decel": 0.9,
+    "Regiopanter 3 car (Class 640)": {
+        "traction": "ELECTRIC", "mass": 159000, "length": 79.4,
+        "power": 2040, "aux_power": 80, "accel": 0.8, "decel": 0.9,
         "efficiency": 0.85
-    }
+    },
+    "Regionova (Class 814)": {
+        "traction": "DIESEL", "mass": 39600, "length": 28.44,
+        "power": 242, "aux_power": 10, "accel": 0.5, "decel": 0.8,
+        "efficiency": 0.30
+    },
+    "750-7 + 4 cars": {
+        "traction": "DIESEL", "mass": 207000, "length": 90.16,
+        "power": 1550, "aux_power": 40, "accel": 0.4, "decel": 0.8,
+        "efficiency": 0.30
+    },
 }
 
 # ==========================================
