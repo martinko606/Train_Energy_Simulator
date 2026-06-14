@@ -41,7 +41,7 @@ PREDEFINED_VEHICLES = {
         "power": 242, "aux_power": 10, "accel": 0.5, "decel": 0.8,
         "efficiency": 0.30
     },
-    "750-7 + 4 cars": {
+    "750-7 + 3 cars": {
         "traction": "DIESEL", "mass": 207000, "length": 90.16,
         "power": 1550, "aux_power": 40, "accel": 0.4, "decel": 0.8,
         "efficiency": 0.30
