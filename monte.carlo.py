@@ -10,14 +10,13 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import zipfile
 import tempfile
-from lxml import etree
+import xml.etree.ElementTree as ET
 import heapq
 
 # ==========================================
 #  CONFIGURATION
 # ==========================================
 RAILML_ZIP_PATH = "railML_export_20251214_20260414.zip"
-
 
 # ==========================================
 #  PRE-DEFINED VEHICLE FLEET
@@ -92,20 +91,31 @@ def load_railml_from_zip(zip_path):
 
         stations_dict = {}
         lines_dict = {}
-        ns = "{*}"
 
-        context = etree.iterparse(xml_file_path, events=('end',), tag=[f"{ns}operationalPoint", f"{ns}line"])
+        # Safe namespace-agnostic finders for standard ElementTree
+        def find_local(element, local_name):
+            for child in element:
+                tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if tag == local_name:
+                    return child
+            return None
+
+        def findall_local(element, local_name):
+            return [child for child in element if
+                    (child.tag.split('}')[-1] if '}' in child.tag else child.tag) == local_name]
+
+        context = ET.iterparse(xml_file_path, events=('end',))
 
         for event, elem in context:
-            tag_name = etree.QName(elem.tag).localname
+            tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
 
             # --- Extract Operational Points (Nodes) ---
             if tag_name == 'operationalPoint':
                 op_type = "IGNORE"
 
-                op_ops = elem.find(f"{ns}opOperations")
+                op_ops = find_local(elem, "opOperations")
                 if op_ops is not None:
-                    op_op = op_ops.find(f"{ns}opOperation")
+                    op_op = find_local(op_ops, "opOperation")
                     if op_op is not None:
                         op_cat = op_op.get("operationalType")
                         if op_cat == "station":
@@ -114,11 +124,11 @@ def load_railml_from_zip(zip_path):
                             op_type = "R"  # Request Stop
 
                 op_id = elem.get("id")
-                op_name = elem.find(f"{ns}name")
+                op_name = find_local(elem, "name")
                 name_val = op_name.get("name") if op_name is not None else "Unknown"
 
                 connected_lines = []
-                for c in elem.findall(f"{ns}connectedToLine"):
+                for c in findall_local(elem, "connectedToLine"):
                     ref = c.get("ref")
                     if ref: connected_lines.append(ref)
 
@@ -128,23 +138,25 @@ def load_railml_from_zip(zip_path):
                     "connected": connected_lines
                 }
 
+                # Clear to save memory
+                elem.clear()
+
             # --- Extract Lines (Edges/Micro-Segments) ---
             elif tag_name == 'line':
                 line_id = elem.get("id")
 
-                # Extract Line Name based on user preference instead of designator
                 line_name = "Unknown"
-                line_name_elem = elem.find(f"{ns}name")
+                line_name_elem = find_local(elem, "name")
                 if line_name_elem is not None and line_name_elem.get("name"):
                     line_name = line_name_elem.get("name").strip()
 
-                lin_loc = elem.find(f"{ns}linearLocation")
+                lin_loc = find_local(elem, "linearLocation")
                 km_start, km_end = 0.0, 0.0
                 if lin_loc is not None:
-                    assoc = lin_loc.find(f"{ns}associatedNetElement")
+                    assoc = find_local(lin_loc, "associatedNetElement")
                     if assoc is not None:
-                        c_begin = assoc.find(f"{ns}linearCoordinateBegin")
-                        c_end = assoc.find(f"{ns}linearCoordinateEnd")
+                        c_begin = find_local(assoc, "linearCoordinateBegin")
+                        c_end = find_local(assoc, "linearCoordinateEnd")
                         if c_begin is not None:
                             try:
                                 km_start = float(c_begin.get("measure"))
@@ -157,7 +169,7 @@ def load_railml_from_zip(zip_path):
                                 pass
 
                 v_limit = 80.0
-                perf = elem.find(f"{ns}linePerformance")
+                perf = find_local(elem, "linePerformance")
                 if perf is not None and perf.get("maxSpeed"):
                     try:
                         v_limit = float(perf.get("maxSpeed"))
@@ -165,7 +177,7 @@ def load_railml_from_zip(zip_path):
                         pass
 
                 grad = 0.0
-                layout = elem.find(f"{ns}lineLayout")
+                layout = find_local(elem, "lineLayout")
                 if layout is not None and layout.get("maxGradient"):
                     try:
                         grad = float(layout.get("maxGradient"))
@@ -181,10 +193,8 @@ def load_railml_from_zip(zip_path):
                     "line_name": line_name
                 }
 
-            # Free memory dynamically
-            elem.clear()
-            while elem.getprevious() is not None:
-                del elem.getparent()[0]
+                # Clear to save memory
+                elem.clear()
 
         # --- Resolve Graph Endpoints ---
         for op_id, data in stations_dict.items():
@@ -626,14 +636,169 @@ def create_plotly_figure(history, stops_names, all_stations, is_electric, x_axis
             pass
 
     fig.update_layout(
-        height=850, margin=dict(l=40, r=40, t=40, b=140), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=850, margin=dict(l=40, r=40, t=100, b=140), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="right", x=1),
         xaxis=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format, showticklabels=True),
         xaxis2=dict(showgrid=True, title=x_title, range=[x_min, x_max], tickformat=x_format, showticklabels=True),
         yaxis=dict(title="Speed (km/h)", showgrid=True),
         yaxis2=dict(title="Energy (kWh)", showgrid=True),
         shapes=shapes, annotations=annotations
     )
+    return fig
+
+
+def make_profile_chart(df: pd.DataFrame) -> go.Figure:
+    total_km = float(df["cum_km"].max())
+
+    mid_km, seg_widths = [], []
+    for i in range(len(df) - 1):
+        x0 = float(df["cum_km"].iloc[i])
+        x1 = float(df["cum_km"].iloc[i + 1])
+        mid_km.append((x0 + x1) / 2)
+        seg_widths.append(max(x1 - x0, 0.001))
+
+    stops_x = df[df["stop_type"] == "X"]
+    stops_r = df[df["stop_type"] == "R"]
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        subplot_titles=("Statutory Track Speed Limit [km/h]",
+                        "Gradient [‰]  (↑ uphill  ↓ downhill)",
+                        "Electrification"),
+        row_heights=[0.48, 0.32, 0.20], vertical_spacing=0.055,
+    )
+
+    # ── Speed — STEPPED line
+    hover_txt = []
+    for _, row in df.iterrows():
+        nm = str(row.get("station_name", "")).strip()
+        stype = str(row.get("stop_type", "")).strip()
+        tag = f"<b>{nm}</b><br>" if nm and nm != "nan" else ""
+        stop_tag = {"X": " 🚉", "R": " 🛑"}.get(stype, "")
+        hover_txt.append(
+            f"{tag}km {row['cum_km']:.2f}{stop_tag}<br>"
+            f"{row['speed_kmh']:.0f} km/h<br>"
+            f"Grad: {row['gradient_perm']:.1f} ‰<br>"
+            f"{row['electrification']}<extra></extra>"
+        )
+
+    fig.add_trace(go.Scatter(
+        x=df["cum_km"], y=df["speed_kmh"],
+        mode="lines", name="Statutory Limit",
+        line=dict(color="#2563EB", width=2.5, shape="hv"),
+        fill="tozeroy", fillcolor="rgba(37,99,235,0.08)",
+        hovertemplate=hover_txt,
+    ), row=1, col=1)
+
+    spd_changes = df[df["speed_kmh"].diff().abs() > 0.5].copy()
+    if not spd_changes.empty:
+        fig.add_trace(go.Scatter(
+            x=spd_changes["cum_km"], y=spd_changes["speed_kmh"],
+            mode="markers",
+            marker=dict(symbol="line-ns", size=12, color="#2563EB",
+                        line=dict(color="#2563EB", width=2)),
+            name="Speed change",
+            showlegend=False,
+            hovertemplate="km %{x:.2f}<br><b>%{y:.0f} km/h</b><extra></extra>",
+        ), row=1, col=1)
+
+    n_x = max(len(stops_x), 1)
+    label_every = max(1, n_x // 20)
+    labelled_x = stops_x.iloc[::label_every]
+    unlabelled_x = stops_x[~stops_x.index.isin(labelled_x.index)]
+
+    if not labelled_x.empty:
+        fig.add_trace(go.Scatter(
+            x=labelled_x["cum_km"], y=labelled_x["speed_kmh"],
+            mode="markers+text",
+            marker=dict(symbol="diamond", size=9, color="#EA580C", line=dict(color="white", width=1.5)),
+            text=labelled_x["station_name"], textposition="top center", textfont=dict(size=7, color="#1E293B"),
+            name="Station (X)", hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+        ), row=1, col=1)
+
+    if not unlabelled_x.empty:
+        fig.add_trace(go.Scatter(
+            x=unlabelled_x["cum_km"], y=unlabelled_x["speed_kmh"],
+            mode="markers",
+            marker=dict(symbol="diamond", size=6, color="#EA580C", line=dict(color="white", width=1)),
+            showlegend=False, text=unlabelled_x["station_name"],
+            hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+        ), row=1, col=1)
+
+    if not stops_r.empty:
+        fig.add_trace(go.Scatter(
+            x=stops_r["cum_km"], y=stops_r["speed_kmh"],
+            mode="markers",
+            marker=dict(symbol="circle", size=7, color="#CA8A04", line=dict(color="white", width=1)),
+            name="Halt (R)", text=stops_r["station_name"],
+            hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+        ), row=1, col=1)
+
+    # ── Gradient — Solid Bar Fill to eliminate Plotly 0-crossover bugs
+    grads = df["gradient_perm"].iloc[:-1] if len(df) > 1 else df["gradient_perm"]
+    pos_g = grads.clip(lower=0)
+    neg_g = grads.clip(upper=0)
+
+    fig.add_trace(go.Bar(
+        x=mid_km, y=pos_g, width=seg_widths, marker_color="#DC2626", name="Uphill",
+        hovertemplate="km %{x:.2f}<br>+%{y:.1f} ‰<extra></extra>"
+    ), row=2, col=1)
+
+    fig.add_trace(go.Bar(
+        x=mid_km, y=neg_g, width=seg_widths, marker_color="#2563EB", name="Downhill",
+        hovertemplate="km %{x:.2f}<br>%{y:.1f} ‰<extra></extra>"
+    ), row=2, col=1)
+
+    # ── Electrification band
+    elec = df["electrification"].iloc[:-1] if len(df) > 1 else df["electrification"]
+
+    ELEC_COLORS = {
+        "NONE": "#9CA3AF",
+        "25,000V/50Hz": "#16A34A",
+        "3,000V/0Hz": "#7C3AED",
+        "1,500V/0Hz": "#0891B2",
+        "15,000V/16.7Hz": "#D97706",
+    }
+
+    def elec_color(label: str) -> str:
+        for k, v in ELEC_COLORS.items():
+            if k in label:
+                return v
+        return ELEC_COLORS["NONE"]
+
+    seg_colors = [elec_color(e) for e in elec]
+    seg_hover = list(elec)
+
+    fig.add_trace(go.Bar(
+        x=mid_km, y=[1] * len(mid_km), width=seg_widths,
+        marker_color=seg_colors, name="Electrification", hovertext=seg_hover,
+        hovertemplate="%{hovertext}<br>km %{x:.2f}<extra></extra>", showlegend=False,
+    ), row=3, col=1)
+
+    for _, sr in labelled_x.iterrows():
+        fig.add_vline(x=sr["cum_km"], line_width=0.7, line_dash="dot", line_color="#CBD5E1", row=1, col=1)
+
+    spd_min = float(df["speed_kmh"].min())
+    spd_max = float(df["speed_kmh"].max())
+    spd_lo = max(0, spd_min * 0.75)
+    spd_hi = spd_max * 1.25
+
+    fig.update_xaxes(title_text="Distance from departure [km]", row=3, col=1, gridcolor="#F1F5F9")
+    fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1, gridcolor="#F1F5F9", range=[spd_lo, spd_hi])
+    fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1, gridcolor="#F1F5F9", zeroline=True,
+                     zerolinecolor="#CBD5E1")
+    fig.update_yaxes(showticklabels=False, row=3, col=1, range=[0, 1.1])
+
+    # Adjusted Height, Margin, and Legend position to fix subtitle overlap issues
+    fig.update_layout(
+        height=800, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0, bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="#E2E8F0", borderwidth=1),
+        margin=dict(t=130, b=10, l=60, r=20),
+        font=dict(family="Inter, sans-serif", size=12),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(gridcolor="#F1F5F9", showgrid=True)
     return fig
 
 
@@ -939,30 +1104,85 @@ elif st.session_state.journey_results:
     c4.metric(f"Total Saved ({master_unit})", f"{cum_base_val - cum_curr_val:.1f}", help="Vs. stopping at all requests")
 
     st.markdown("---")
+
+    # We will build tabs for the individual legs so that we can render the profile chart
     st.subheader("🗺️ Itinerary Breakdown")
 
     for res in st.session_state.journey_results:
         cfg = res["config"]
         with st.expander(f"Leg {res['leg_num']}: {cfg['start']} ➔ {cfg['end']} (Mode: {cfg['mode'].upper()})",
                          expanded=True):
-            m, s = int(res["stats_curr"]["journey_time_s"] // 60), int(res["stats_curr"]["journey_time_s"] % 60)
-            sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("Leg Specific Time", f"{m:02d}:{s:02d}")
-            sc2.metric("Leg Stops", len(res["stops"]))
 
-            if res["traction"] == "DIESEL":
-                cf = res["diesel_density"] * res["efficiency"]
-                u_used = res["stats_curr"]["net_kwh"] / cf
-                u_saved = (res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]) / cf
-            else:
-                u_used = res["stats_curr"]["net_kwh"]
-                u_saved = res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]
-            sc3.metric(f"Used / Saved ({master_unit})", f"{u_used:.1f} / {u_saved:.1f}")
+            # --- TABS FOR DIFFERENT CHARTS ---
+            tab_kinematic, tab_profile = st.tabs(["Kinematic Physics Profile", "Statutory Track Limits Profile"])
 
-            fig = create_plotly_figure(res["history"], res["stops"], res["track"].stations,
-                                       res["traction"] == "ELECTRIC", x_axis_choice)
-            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-            st.caption(f"**Stops Made:** {', '.join(res['stops']) if res['stops'] else 'None'}")
+            with tab_kinematic:
+                m, s = int(res["stats_curr"]["journey_time_s"] // 60), int(res["stats_curr"]["journey_time_s"] % 60)
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Leg Specific Time", f"{m:02d}:{s:02d}")
+                sc2.metric("Leg Stops", len(res["stops"]))
+
+                if res["traction"] == "DIESEL":
+                    cf = res["diesel_density"] * res["efficiency"]
+                    u_used = res["stats_curr"]["net_kwh"] / cf
+                    u_saved = (res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]) / cf
+                else:
+                    u_used = res["stats_curr"]["net_kwh"]
+                    u_saved = res["stats_all"]["net_kwh"] - res["stats_curr"]["net_kwh"]
+                sc3.metric(f"Used / Saved ({master_unit})", f"{u_used:.1f} / {u_saved:.1f}")
+
+                fig_kinematic = create_plotly_figure(res["history"], res["stops"], res["track"].stations,
+                                                     res["traction"] == "ELECTRIC", x_axis_choice)
+                st.plotly_chart(fig_kinematic, use_container_width=True, theme="streamlit")
+                st.caption(f"**Stops Made:** {', '.join(res['stops']) if res['stops'] else 'None'}")
+
+            with tab_profile:
+                # We need to construct a dataframe matching the expected format for make_profile_chart
+                prof_data = []
+                for idx, seg in enumerate(res["track"].segments):
+                    prof_data.append({
+                        "cum_km": seg["km_low"],
+                        "speed_kmh": seg["v_limit"] * 3.6,
+                        "gradient_perm": seg["grad"],
+                        "electrification": "UNKNOWN",
+                        "station_name": "",
+                        "stop_type": ""
+                    })
+                # Append final point
+                if res["track"].segments:
+                    last_seg = res["track"].segments[-1]
+                    prof_data.append({
+                        "cum_km": last_seg["km_high"],
+                        "speed_kmh": last_seg["v_limit"] * 3.6,
+                        "gradient_perm": last_seg["grad"],
+                        "electrification": "UNKNOWN",
+                        "station_name": "",
+                        "stop_type": ""
+                    })
+
+                df_prof = pd.DataFrame(prof_data)
+
+                # Match stations
+                for stn in res["track"].stations:
+                    closest_idx = (np.abs(df_prof["cum_km"] - stn["km"])).idxmin()
+                    # Only map if reasonably close, else append
+                    if abs(df_prof.loc[closest_idx, "cum_km"] - stn["km"]) < 0.01:
+                        df_prof.loc[closest_idx, "station_name"] = stn["name"]
+                        df_prof.loc[closest_idx, "stop_type"] = stn["type"]
+                    else:
+                        df_prof = pd.concat([df_prof, pd.DataFrame([{
+                            "cum_km": stn["km"],
+                            "speed_kmh": res["track"].get_effective_limit_and_grad(stn["km"], stn["km"])[0] * 3.6,
+                            "gradient_perm": res["track"].get_effective_limit_and_grad(stn["km"], stn["km"])[1],
+                            "electrification": "UNKNOWN",
+                            "station_name": stn["name"],
+                            "stop_type": stn["type"]
+                        }])], ignore_index=True)
+
+                df_prof = df_prof.sort_values(by="cum_km").reset_index(drop=True)
+                fig_profile = make_profile_chart(df_prof)
+                st.plotly_chart(fig_profile, use_container_width=True, theme="streamlit")
+
 
 # --- RENDER MONTE CARLO (MC Mode) ---
 elif st.session_state.mc_results is not None:
