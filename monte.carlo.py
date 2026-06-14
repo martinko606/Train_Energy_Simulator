@@ -820,41 +820,15 @@ st.sidebar.success(f"Network Topological Graph Built!")
 # --- 1. ROUTE SELECTION ---
 st.sidebar.header("1. Route Selection")
 
-all_line_names = sorted(list(set(e["line_name"] for e in edges if e["line_name"] != "Unknown")))
-if not all_line_names:
-    st.error("No named lines found in the dataset.")
-    st.stop()
-
-selected_lines = st.sidebar.multiselect(
-    "Select Railway Line(s)",
-    all_line_names,
-    default=[all_line_names[0]],
-    help="Select one or more lines to combine for your route."
-)
-
-if not selected_lines:
-    st.warning("Please select at least one railway line to populate the stations.")
-    st.stop()
-
-filtered_edges = [e for e in edges if e["line_name"] in selected_lines]
-valid_node_ids = set()
-for e in filtered_edges:
-    valid_node_ids.add(e["u"])
-    valid_node_ids.add(e["v"])
-
-filtered_nodes = {nid: n for nid, n in nodes.items() if nid in valid_node_ids}
-
-passenger_stations = [n["name"] for nid, n in filtered_nodes.items() if
-                      n["type"] in ["X", "R"] and n["name"] != "Unknown"]
+passenger_stations = [n["name"] for nid, n in nodes.items() if n["type"] in ["X", "R"] and n["name"] != "Unknown"]
 passenger_stations = sorted(list(set(passenger_stations)))
 
 if not passenger_stations:
-    st.error("No valid passenger stations found in the selected lines.")
+    st.error("No valid passenger stations found in the dataset.")
     st.stop()
 
 mc_start = st.sidebar.selectbox("Terminal A", passenger_stations, index=0)
 mc_end = st.sidebar.selectbox("Terminal B", passenger_stations, index=len(passenger_stations) - 1)
-line_display_name = ", ".join(selected_lines) if len(selected_lines) <= 2 else f"{len(selected_lines)} Selected Lines"
 
 # --- 2. TRAIN PARAMETERS ---
 st.sidebar.header("2. Train Parameters")
@@ -966,8 +940,7 @@ if builder_mode in ["Manual (Leg-by-Leg)", "Auto-Repeat Round Trip"]:
                 global_time, global_dist = 0.0, 0.0
                 for idx, leg_cfg in enumerate(itinerary_config):
 
-                    track = build_route_profile(leg_cfg["start"], leg_cfg["end"], filtered_nodes, filtered_edges,
-                                                is_reverse=False)
+                    track = build_route_profile(leg_cfg["start"], leg_cfg["end"], nodes, edges, is_reverse=False)
                     if not track:
                         st.error(f"No route found between {leg_cfg['start']} and {leg_cfg['end']}.")
                         st.stop()
@@ -1007,7 +980,7 @@ else:
 
         with st.spinner(f"Running Monte Carlo (N={mc_runs})..."):
             try:
-                track = build_route_profile(mc_start, mc_end, filtered_nodes, filtered_edges, is_reverse=False)
+                track = build_route_profile(mc_start, mc_end, nodes, edges, is_reverse=False)
                 if not track:
                     st.error(f"No valid physical route found between {mc_start} and {mc_end}.")
                     st.stop()
@@ -1073,7 +1046,7 @@ else:
 #  MAIN VIEW RENDERER
 # ==========================================
 if not st.session_state.journey_results and st.session_state.mc_results is None:
-    st.info("👈 **Select a railway line, configure your simulation in the sidebar, and click 'Run' to begin.**")
+    st.info("👈 **Select your stations, configure your simulation in the sidebar, and click 'Run' to begin.**")
 
 # --- RENDER ITINERARY (Standard Mode) ---
 elif st.session_state.journey_results:
