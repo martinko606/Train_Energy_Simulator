@@ -13,7 +13,6 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Physics simulation with dynamic Davis equation & vehicle max-speed cap
 • Kinematic chart with time/distance X-axis toggle & station annotations
 • Monte Carlo stochastic stop-probability analysis with progress bar
-
 Run:  streamlit run dypod_simulator.py
 """
 from __future__ import annotations
