@@ -252,11 +252,18 @@ class DYPODParser:
         return None, []
 
     # ── Electrification analysis ───────────────────────────────────────────────
-    def analyse_electrification(self, start_op: str, end_op: str, comp_sys: list[str] = None) -> dict:
-        _, p_normal = self.dijkstra(start_op, end_op, 0, comp_sys)
-        if not p_normal: return dict(normal_km=0, incomp_km=0, gateway_km=0,
-                                     penalised_km=0, penalised_incomp_km=0,
-                                     detour_km=0, saving_km=0, has_alternative=False)
+    def analyse_electrification(self, start_op: str, end_op: str, via_ops: list[str] = None, comp_sys: list[str] = None) -> dict:
+        waypoints = [start_op] + (via_ops or []) + [end_op]
+
+        p_normal = []
+        for i in range(len(waypoints) - 1):
+            _, path = self.dijkstra(waypoints[i], waypoints[i + 1], 0, comp_sys)
+            if not path:
+                return dict(normal_km=0, incomp_km=0, gateway_km=0,
+                            penalised_km=0, penalised_incomp_km=0,
+                            detour_km=0, saving_km=0, has_alternative=False)
+            p_normal.extend(path)
+
         def _ue(path): return sum(self.seg_props.get(s["ne_id"],{}).get("length_m",0)
                                    for s in path if (comp_sys is not None and s["electr"] not in comp_sys)) / 1000
         def _tot(path): return sum(self.seg_props.get(s["ne_id"],{}).get("length_m",0)
@@ -266,7 +273,15 @@ class DYPODParser:
         for s in p_normal:
             if comp_sys is not None and s["electr"] not in comp_sys: break
             gw_km += self.seg_props.get(s["ne_id"],{}).get("length_m",0)/1000
-        _, p_pen   = self.dijkstra(start_op, end_op, 100_000, comp_sys)
+
+        p_pen = []
+        for i in range(len(waypoints) - 1):
+            _, path = self.dijkstra(waypoints[i], waypoints[i + 1], 100_000, comp_sys)
+            if not path:
+                p_pen = p_normal
+                break
+            p_pen.extend(path)
+
         pen_ue = _ue(p_pen); pen_tot = _tot(p_pen)
         saving = normal_ue - pen_ue; detour = pen_tot - normal_tot
         has_alt = saving >= 1.0 and detour <= max(saving * 10, 30)
@@ -975,6 +990,8 @@ st.markdown("""<style>
         padding:10px 14px;font-size:.85rem;color:#14532D;margin:8px 0}
 </style>""", unsafe_allow_html=True)
 
+if "rebuild_profile" not in st.session_state:
+    st.session_state.rebuild_profile = False
 for _k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result",
            "elec_analysis","op_start","op_end","comp_sys"):
     if _k not in st.session_state: st.session_state[_k] = None
@@ -1128,10 +1145,11 @@ with st.sidebar:
 
 
 # ── Actions ───────────────────────────────────────────────────────────────────
-if btn_profile and op_start and op_end:
+if (btn_profile or st.session_state.rebuild_profile) and op_start and op_end:
+    st.session_state.rebuild_profile = False
     pen = pen_km * 1000.0 if elec_reroute else 0.0
     with st.spinner("Finding path and building profile…"):
-        ea  = parser.analyse_electrification(op_start, op_end, comp_sys)
+        ea  = parser.analyse_electrification(op_start, op_end, via_ops=st.session_state.via_ops or [], comp_sys=comp_sys)
         df  = parser.build_profile(op_start, op_end,
                                     via_ops=st.session_state.via_ops or [],
                                     penalty_m=pen, comp_sys=comp_sys)
@@ -1331,7 +1349,7 @@ with tab_edit:
 
     # Via waypoints
     st.markdown('<div class="sec">📍 Via Waypoints</div>', unsafe_allow_html=True)
-    st.caption("Force the route through specific intermediate stations. Rebuild after changes.")
+    st.caption("Force the route through specific intermediate stations. Rebuilds profile automatically.")
 
     station_dict = {nm: oid for nm, oid in parser.station_list}
     station_names = list(station_dict.keys())
@@ -1343,6 +1361,7 @@ with tab_edit:
         via_op = station_dict.get(via_sel_name)
         if via_op and via_op not in st.session_state.via_ops:
             st.session_state.via_ops.append(via_op)
+            st.session_state.rebuild_profile = True
             st.rerun()
 
     if st.session_state.via_ops:
@@ -1353,16 +1372,20 @@ with tab_edit:
             e1.markdown(f"**{i+1}**")
             if e2.button("↑", key=f"up_{i}", disabled=i==0):
                 st.session_state.via_ops[i], st.session_state.via_ops[i-1] = \
-                    st.session_state.via_ops[i-1], st.session_state.via_ops[i]; st.rerun()
+                    st.session_state.via_ops[i-1], st.session_state.via_ops[i]
+                st.session_state.rebuild_profile = True
+                st.rerun()
             e3.markdown(f"📍 **{info.get('name',vid)}** "
                          f"<span style='color:{C['grey']};font-size:.8rem'>"
                          f"{', '.join(info.get('types',[]))}</span>", unsafe_allow_html=True)
-            if e4.button("✕", key=f"rm_{i}", use_container_width=True):
-                st.session_state.via_ops.pop(i); st.rerun()
+            if e4.button("✕ Remove", key=f"rm_{i}", use_container_width=True):
+                st.session_state.via_ops.pop(i)
+                st.session_state.rebuild_profile = True
+                st.rerun()
         if st.button("🗑️ Clear all"):
-            st.session_state.via_ops=[]; st.rerun()
-        st.markdown('<div class="info-box">ℹ️ Click <b>Build Track Profile</b> in the sidebar to apply.</div>',
-                    unsafe_allow_html=True)
+            st.session_state.via_ops=[]
+            st.session_state.rebuild_profile = True
+            st.rerun()
     else:
         st.markdown('<div class="info-box">No via-waypoints. Router uses direct shortest path.</div>',
                     unsafe_allow_html=True)
