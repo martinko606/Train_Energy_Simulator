@@ -301,10 +301,13 @@ class DYPODParser:
                       penalty_m: float = 0.0, comp_sys: list[str] = None) -> pd.DataFrame:
         waypoints = [start_op] + (via_ops or []) + [end_op]
         all_steps: list[dict] = []
+
+        # Sequentially search and stitch the paths exactly through all given waypoints
         for i in range(len(waypoints) - 1):
             _, path = self.dijkstra(waypoints[i], waypoints[i + 1], penalty_m, comp_sys)
             if not path: return pd.DataFrame()
             all_steps.extend(path)
+
         if not all_steps: return pd.DataFrame()
 
         def _stop_type(oid: str) -> str:
@@ -641,17 +644,24 @@ def kpi_card(val: str, lbl: str, delta: str = "", color: str = C["primary"]) -> 
             f'<div style="font-size:.72rem;color:#64748B;margin-top:2px">{lbl}</div>{d}</div>')
 
 def load_xml_from_upload(uploaded) -> str | None:
+    # Use a deterministic temporary directory based on the app to prevent state wiping
+    tmp_dir = os.path.join(tempfile.gettempdir(), "dypod_fixed_cache")
+    os.makedirs(tmp_dir, exist_ok=True)
+
     ext = uploaded.name.lower().rsplit(".",1)[-1]
-    tmp = tempfile.mkdtemp(prefix="dypod_")
     if ext == "zip":
-        zp = os.path.join(tmp, uploaded.name)
-        with open(zp,"wb") as f: f.write(uploaded.read())
+        zp = os.path.join(tmp_dir, uploaded.name)
+        with open(zp,"wb") as f: f.write(uploaded.getbuffer())
         with zipfile.ZipFile(zp) as zf:
             xmls = [n for n in zf.namelist() if n.lower().endswith((".xml",".railml"))]
             if not xmls: return None
-            zf.extract(xmls[0], tmp); return os.path.join(tmp, xmls[0])
-    path = os.path.join(tmp, uploaded.name)
-    with open(path,"wb") as f: f.write(uploaded.read())
+            extracted_path = os.path.join(tmp_dir, xmls[0])
+            if not os.path.exists(extracted_path):
+                zf.extract(xmls[0], tmp_dir)
+            return extracted_path
+
+    path = os.path.join(tmp_dir, uploaded.name)
+    with open(path,"wb") as f: f.write(uploaded.getbuffer())
     return path
 
 
@@ -1015,8 +1025,11 @@ with st.sidebar:
                                  label_visibility="collapsed")
     xml_path = None
     if uploaded:
-        xp = load_xml_from_upload(uploaded)
-        if xp and xp != st.session_state.xml_path:
+        # Prevent constant state-wiping by checking file name and size
+        file_id = f"{uploaded.name}_{uploaded.size}"
+        if st.session_state.get("last_uploaded_id") != file_id:
+            st.session_state.last_uploaded_id = file_id
+            xp = load_xml_from_upload(uploaded)
             for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys"):
                 st.session_state[k] = None if k != "via_ops" else []
             st.session_state.xml_path = xp
@@ -1030,6 +1043,7 @@ with st.sidebar:
                 for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys"):
                     st.session_state[k] = None if k != "via_ops" else []
                 st.session_state.xml_path = sel
+                st.session_state.last_uploaded_id = None
             xml_path = sel
 
     @st.cache_resource(show_spinner="Parsing railML infrastructure (~5 s)…")
