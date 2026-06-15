@@ -156,10 +156,14 @@ class DYPODParser:
             ne_ref = ane.get("netElementRef", "")
             if ne_ref not in grad_map:
                 grad_map[ne_ref] = {"normal": 0.0, "reverse": 0.0}
-            if app_dir == "normal":
+
+            # Safely assign normal and reverse gradients
+            if app_dir in ("normal", "both", ""):
                 grad_map[ne_ref]["normal"] = grad
+                grad_map[ne_ref]["reverse"] = -grad
             elif app_dir == "reverse":
                 grad_map[ne_ref]["reverse"] = grad
+                grad_map[ne_ref]["normal"] = -grad
 
         elec_map: dict[str, str] = {}
         for sec in self._root.iter("electrificationSection"):
