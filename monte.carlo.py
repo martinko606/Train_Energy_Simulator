@@ -1376,8 +1376,8 @@ with tab_edit:
                             use_container_width=True, key="route_map_tab2")
 
         # Override table
-        st.markdown('<div class="sec">📝 Speed & Stop Overrides</div>', unsafe_allow_html=True)
-        st.caption("Edit speed limits or stop types directly. Changes apply to the simulation only.")
+        st.markdown('<div class="sec">📝 Speed, Stop & Electrification Overrides</div>', unsafe_allow_html=True)
+        st.caption("Edit speed limits, stop types, or electrification directly. Changes apply to the simulation only.")
         edit_cols = ["station_name","stop_type","speed_kmh","gradient_perm","electrification","length_m"]
         edit_cols = [c for c in edit_cols if c in df.columns]
         edited = st.data_editor(df[edit_cols].copy(), column_config={
@@ -1385,7 +1385,7 @@ with tab_edit:
             "stop_type":       st.column_config.SelectboxColumn("Stop",    options=["X","R",""],  width="small"),
             "speed_kmh":       st.column_config.NumberColumn("Speed [km/h]", min_value=0, max_value=350, width="small"),
             "gradient_perm":   st.column_config.NumberColumn("Grad [‰]",  disabled=True, width="small"),
-            "electrification": st.column_config.TextColumn("Electrif.",   disabled=True, width="medium"),
+            "electrification": st.column_config.SelectboxColumn("Electrif.", options=list(ELEC_COLORS.keys()), disabled=False, width="medium"),
             "length_m":        st.column_config.NumberColumn("Length [m]", disabled=True, width="small"),
         }, use_container_width=True, hide_index=True, num_rows="fixed", key="editor_tbl")
 
@@ -1393,6 +1393,24 @@ with tab_edit:
             updated = df.copy()
             updated["speed_kmh"] = edited["speed_kmh"].values
             updated["stop_type"] = edited["stop_type"].values
+            updated["electrification"] = edited["electrification"].values
+            updated["recuperation"] = updated["electrification"].apply(lambda x: 0 if x == "NONE" else 1)
+
+            # Recalculate the non-electrified gap ahead for the coasting physics engine
+            if "ue_gap_m" in updated.columns:
+                ue_gap_ahead = []
+                for i in range(len(updated)):
+                    if updated["electrification"].iloc[i] != "NONE":
+                        ue_gap_ahead.append(0.0)
+                        continue
+                    gap, j = 0.0, i
+                    while j < len(updated):
+                        if updated["electrification"].iloc[j] != "NONE": break
+                        gap += float(updated["length_m"].iloc[j])
+                        j += 1
+                    ue_gap_ahead.append(gap)
+                updated["ue_gap_m"] = ue_gap_ahead
+
             st.session_state.profile_df = updated
             st.session_state.rep_result = None
             st.success("✅ Profile updated. Run the simulation from the **▶️ Kinematic Simulation** tab.")
