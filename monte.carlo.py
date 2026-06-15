@@ -13,7 +13,7 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Physics simulation with dynamic Davis equation & vehicle max-speed cap
 • Kinematic chart with time/distance X-axis toggle & station annotations
 • Monte Carlo stochastic stop-probability analysis with progress bar
-Run:  streamlit run dypod_simulator.py
+Run:  streamlit run app.py
 """
 from __future__ import annotations
 import glob, heapq, itertools, math, os, random, tempfile, time, zipfile
@@ -188,6 +188,10 @@ class DYPODParser:
             ne_ref   = ane.get("netElementRef", "")
             lel      = line.find("length")
             length_m = float(lel.get("value", 0)) if lel is not None else len_map.get(ne_ref, 0.0)
+
+            if length_m <= 0.0:
+                length_m = 10.0  # Failsafe to prevent 0-cost shortcuts in Dijkstra
+
             lp       = line.find("linePerformance")
             ll       = line.find("lineLayout")
             lo       = line.find("lineOperation")
@@ -504,8 +508,10 @@ class TrainSimulator:
         while dist < total_m:
             iters += 1
             if iters > max_iters:
-                raise RuntimeError(f"Simulation stalled at km {dist/1000:.2f}. "
-                                   "Check that the vehicle has enough power for the gradient.")
+                if coasting:
+                    raise RuntimeError(f"Simulation stranded at km {km:.2f}. The train ran out of momentum while coasting through a neutral section. Increase entry speed, raise the coasting limit, or use a compatible train.")
+                else:
+                    raise RuntimeError(f"Simulation stalled at km {km:.2f}. The train lacks sufficient power to overcome the gradient and resistance.")
 
             km      = dist / 1000.0
             rear_km = max(0.0, km - self.length_m / 1000.0)
@@ -1153,7 +1159,7 @@ if (btn_profile or st.session_state.rebuild_profile) and op_start and op_end:
         df  = parser.build_profile(op_start, op_end,
                                     via_ops=st.session_state.via_ops or [],
                                     penalty_m=pen, comp_sys=comp_sys)
-    if df.empty: st.error("No path found between the selected stations.")
+    if df is None or df.empty: st.error("No path found between the selected stations.")
     else:
         st.session_state.update(profile_df=df, op_start=op_start, op_end=op_end,
                                  elec_analysis=ea, rep_result=None, mc_result=None,
@@ -1273,7 +1279,7 @@ with tab_prof:
 
     st.write("")
 
-    st.plotly_chart(make_profile_chart(df), use_container_width=True)
+    st.plotly_chart(make_profile_chart(df), use_container_width=True, key="profile_chart_tab1")
 
     # Electrification legend badges
     badges = ""
@@ -1322,7 +1328,7 @@ with tab_prof:
                         font=dict(size=11), align="left", height=24)))
         fig_tbl.update_layout(height=min(60+len(spd_df)*26,440),
                                margin=dict(l=0,r=0,t=0,b=0))
-        st.plotly_chart(fig_tbl, use_container_width=True)
+        st.plotly_chart(fig_tbl, use_container_width=True, key="speed_table_tab1")
 
     # Full data table
     with st.expander("📋 Full profile data table"):
@@ -1477,7 +1483,7 @@ with tab_run_t:
 
     if hist:
         fig_kin = make_kinematic_chart(hist, snames, df_p, x_axis=x_axis_choice)
-        st.plotly_chart(fig_kin, use_container_width=True)
+        st.plotly_chart(fig_kin, use_container_width=True, key="kin_chart_tab3")
 
         csv_kin = pd.DataFrame(hist).to_csv(index=False).encode()
         st.download_button("⬇️ Download telemetry CSV", csv_kin,
@@ -1507,7 +1513,7 @@ with tab_run_t:
                 fig_sv.update_layout(title="Time at speed", xaxis_title="Speed [km/h]",
                     yaxis_title="Seconds", height=280, paper_bgcolor="white",
                     plot_bgcolor="white", margin=dict(t=40,b=40,l=50,r=10))
-                st.plotly_chart(fig_sv, use_container_width=True)
+                st.plotly_chart(fig_sv, use_container_width=True, key="hist_tab3")
             with dd2:
                 wf_v = [stats["gross_kwh"],-stats["regen_kwh"],stats["net_kwh"]]
                 fig_wf = go.Figure(go.Waterfall(orientation="v",
@@ -1521,7 +1527,7 @@ with tab_run_t:
                 fig_wf.update_layout(title="Energy waterfall [kWh]", height=280,
                     paper_bgcolor="white", plot_bgcolor="white",
                     margin=dict(t=40,b=40,l=50,r=10))
-                st.plotly_chart(fig_wf, use_container_width=True)
+                st.plotly_chart(fig_wf, use_container_width=True, key="waterfall_tab3")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1587,7 +1593,7 @@ with tab_mc_t:
             height=400, paper_bgcolor="white", plot_bgcolor="white",
             margin=dict(t=60,b=50,l=60,r=20),
             font=dict(family="Inter, sans-serif",size=12), yaxis=dict(gridcolor=C["light"]))
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, use_container_width=True, key="bar_tab4")
 
     with mc2:
         fig_err = go.Figure()
@@ -1611,7 +1617,7 @@ with tab_mc_t:
             margin=dict(t=60,b=50,l=60,r=20),
             font=dict(family="Inter, sans-serif",size=12), yaxis=dict(gridcolor=C["light"]),
             legend=dict(orientation="h",yanchor="bottom",y=1.02))
-        st.plotly_chart(fig_err, use_container_width=True)
+        st.plotly_chart(fig_err, use_container_width=True, key="err_tab4")
 
     fig_t = go.Figure()
     fig_t.add_trace(go.Scatter(
@@ -1629,7 +1635,7 @@ with tab_mc_t:
         margin=dict(t=60,b=50,l=60,r=20),
         font=dict(family="Inter, sans-serif",size=12), yaxis=dict(gridcolor=C["light"]),
         legend=dict(orientation="h",yanchor="bottom",y=1.02))
-    st.plotly_chart(fig_t, use_container_width=True)
+    st.plotly_chart(fig_t, use_container_width=True, key="time_tab4")
 
     with st.expander("📊 Energy–time trade-off"):
         fig_et = go.Figure(go.Scatter(
@@ -1646,4 +1652,4 @@ with tab_mc_t:
             height=420, paper_bgcolor="white", plot_bgcolor="white",
             margin=dict(t=60,b=50,l=60,r=20),
             font=dict(family="Inter, sans-serif",size=12))
-        st.plotly_chart(fig_et, use_container_width=True)
+        st.plotly_chart(fig_et, use_container_width=True, key="tradeoff_tab4")
