@@ -8,8 +8,8 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
   - Electrification & recuperation per segment
 • Live station search with dropdown suggestions
 • Interactive profile editor with via-waypoints + table overrides
-• Smart electrified-route search (penalty-based rerouting)
-• Electric coasting through short non-electrified gaps (configurable)
+• Smart electrified-route search (penalty-based rerouting for incompatible catenary)
+• Electric coasting through short incompatible/non-electrified gaps (configurable)
 • Physics simulation with dynamic Davis equation & vehicle max-speed cap
 • Kinematic chart with time/distance X-axis toggle & station annotations
 • Monte Carlo stochastic stop-probability analysis with progress bar
@@ -45,14 +45,14 @@ REQUEST_TYPES   = {"stoppingPoint"}
 
 # ── vehicle fleet (merged from all codebase versions) ─────────────────────────
 PREDEFINED_VEHICLES: dict[str, dict] = {
-    "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80),
-    "EDITA+Btax":                  dict(traction="DIESEL",  mass=42_000,  length=30,     power=250,   aux_power=25, accel=0.4, decel=0.8, efficiency=0.30, max_speed=80),
-    "Regionova (Class 814)":       dict(traction="DIESEL",  mass=39_600,  length=28.44,  power=242,   aux_power=10, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80),
-    "RegioNova Duo (Class 840)":   dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=514,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=100),
-    "750-7 + 3 coaches":           dict(traction="DIESEL",  mass=207_000, length=90.16,  power=1_550, aux_power=40, accel=0.4, decel=0.8, efficiency=0.30, max_speed=100),
-    "Regiopanter 3-car (Cl. 640)": dict(traction="ELECTRIC",mass=159_000, length=79.4,   power=2_040, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160),
-    "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=155_000, length=79,     power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160),
-    "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=380_000, length=157.9,  power=5_500, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200),
+    "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
+    "EDITA+Btax":                  dict(traction="DIESEL",  mass=42_000,  length=30,     power=250,   aux_power=25, accel=0.4, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
+    "Regionova (Class 814)":       dict(traction="DIESEL",  mass=39_600,  length=28.44,  power=242,   aux_power=10, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
+    "RegioNova Duo (Class 840)":   dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=514,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=100, systems=[]),
+    "750-7 + 3 coaches":           dict(traction="DIESEL",  mass=207_000, length=90.16,  power=1_550, aux_power=40, accel=0.4, decel=0.8, efficiency=0.30, max_speed=100, systems=[]),
+    "Regiopanter 3-car (Cl. 640)": dict(traction="ELECTRIC",mass=159_000, length=79.4,   power=2_040, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz", "25,000V/50Hz"]),
+    "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=155_000, length=79,     power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz"]),
+    "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=380_000, length=157.9,  power=5_500, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200, systems=["3,000V/0Hz", "25,000V/50Hz", "15,000V/16.7Hz"]),
 }
 
 
@@ -228,7 +228,7 @@ class DYPODParser:
 
     # ── Dijkstra ──────────────────────────────────────────────────────────────
     def dijkstra(self, start: str, end: str,
-                 unelec_penalty_m: float = 0.0) -> tuple[float | None, list]:
+                 penalty_m: float = 0.0, comp_sys: list[str] = None) -> tuple[float | None, list]:
         if start not in self.graph: return None, []
         tb  = itertools.count()
         pq  = [(0.0, next(tb), start, [])]
@@ -241,44 +241,45 @@ class DYPODParser:
             for edge in self.graph.get(node, []):
                 nxt = edge["to"]
                 if nxt in vis: continue
-                pen = unelec_penalty_m if edge["electr"] == "NONE" else 0.0
+                is_incomp = (comp_sys is not None) and (edge["electr"] not in comp_sys)
+                pen = penalty_m if is_incomp else 0.0
                 heapq.heappush(pq, (cost + edge["length_m"] + pen, next(tb), nxt,
                                     path + [dict(from_op=node, **edge)]))
         return None, []
 
     # ── Electrification analysis ───────────────────────────────────────────────
-    def analyse_electrification(self, start_op: str, end_op: str) -> dict:
-        _, p_normal = self.dijkstra(start_op, end_op, 0)
-        if not p_normal: return dict(normal_km=0, normal_ue_km=0, gateway_km=0,
-                                     penalised_km=0, penalised_ue_km=0,
-                                     detour_km=0, elec_saving_km=0, has_alternative=False)
+    def analyse_electrification(self, start_op: str, end_op: str, comp_sys: list[str] = None) -> dict:
+        _, p_normal = self.dijkstra(start_op, end_op, 0, comp_sys)
+        if not p_normal: return dict(normal_km=0, incomp_km=0, gateway_km=0,
+                                     penalised_km=0, penalised_incomp_km=0,
+                                     detour_km=0, saving_km=0, has_alternative=False)
         def _ue(path): return sum(self.seg_props.get(s["ne_id"],{}).get("length_m",0)
-                                   for s in path if s["electr"]=="NONE") / 1000
+                                   for s in path if (comp_sys is not None and s["electr"] not in comp_sys)) / 1000
         def _tot(path): return sum(self.seg_props.get(s["ne_id"],{}).get("length_m",0)
                                     for s in path) / 1000
         normal_ue = _ue(p_normal); normal_tot = _tot(p_normal)
         gw_km = 0.0
         for s in p_normal:
-            if s["electr"] != "NONE": break
+            if comp_sys is not None and s["electr"] not in comp_sys: break
             gw_km += self.seg_props.get(s["ne_id"],{}).get("length_m",0)/1000
-        _, p_pen   = self.dijkstra(start_op, end_op, 100_000)
+        _, p_pen   = self.dijkstra(start_op, end_op, 100_000, comp_sys)
         pen_ue = _ue(p_pen); pen_tot = _tot(p_pen)
-        elec_saving = normal_ue - pen_ue; detour = pen_tot - normal_tot
-        has_alt = elec_saving >= 1.0 and detour <= max(elec_saving * 10, 30)
-        return dict(normal_km=round(normal_tot,1), normal_ue_km=round(normal_ue,1),
+        saving = normal_ue - pen_ue; detour = pen_tot - normal_tot
+        has_alt = saving >= 1.0 and detour <= max(saving * 10, 30)
+        return dict(normal_km=round(normal_tot,1), incomp_km=round(normal_ue,1),
                     gateway_km=round(gw_km,1),
-                    penalised_km=round(pen_tot,1), penalised_ue_km=round(pen_ue,1),
-                    detour_km=round(detour,1), elec_saving_km=round(elec_saving,1),
+                    penalised_km=round(pen_tot,1), penalised_incomp_km=round(pen_ue,1),
+                    detour_km=round(detour,1), saving_km=round(saving,1),
                     has_alternative=has_alt)
 
     # ── Profile builder ────────────────────────────────────────────────────────
     def build_profile(self, start_op: str, end_op: str,
                       via_ops: list[str] | None = None,
-                      unelec_penalty_m: float = 0.0) -> pd.DataFrame:
+                      penalty_m: float = 0.0, comp_sys: list[str] = None) -> pd.DataFrame:
         waypoints = [start_op] + (via_ops or []) + [end_op]
         all_steps: list[dict] = []
         for i in range(len(waypoints) - 1):
-            _, path = self.dijkstra(waypoints[i], waypoints[i + 1], unelec_penalty_m)
+            _, path = self.dijkstra(waypoints[i], waypoints[i + 1], penalty_m, comp_sys)
             if not path: return pd.DataFrame()
             all_steps.extend(path)
         if not all_steps: return pd.DataFrame()
@@ -288,18 +289,6 @@ class DYPODParser:
             if any(t in MANDATORY_TYPES for t in types): return "X"
             if any(t in REQUEST_TYPES   for t in types): return "R"
             return ""
-
-        # Consecutive NONE-gap look-ahead
-        ue_gap_ahead: list[float] = []
-        for i, step in enumerate(all_steps):
-            if self.seg_props.get(step["ne_id"],{}).get("electrification","NONE") != "NONE":
-                ue_gap_ahead.append(0.0); continue
-            gap, j = 0.0, i
-            while j < len(all_steps):
-                s = self.seg_props.get(all_steps[j]["ne_id"],{})
-                if s.get("electrification","NONE") != "NONE": break
-                gap += s.get("length_m",0.0); j += 1
-            ue_gap_ahead.append(gap)
 
         rows: list[dict] = []; cum_m = 0.0
         for idx, step in enumerate(all_steps):
@@ -311,7 +300,6 @@ class DYPODParser:
                 station_name  = info.get("name", from_op),
                 stop_type     = _stop_type(from_op),
                 lat           = info.get("lat"), lon=info.get("lon"),
-                ue_gap_m      = ue_gap_ahead[idx],
                 speed_kmh     = seg.get("speed_normal" if fwd else "speed_reverse", 30.0),
                 gradient_perm = seg.get("grad_normal"  if fwd else "grad_reverse",  0.0),
                 electrification=seg.get("electrification","NONE"),
@@ -327,7 +315,7 @@ class DYPODParser:
         rows.append(dict(
             cum_km        = cum_m/1000.0, op_id=end_op,
             station_name  = info_end.get("name",end_op), stop_type="X",
-            lat=info_end.get("lat"), lon=info_end.get("lon"), ue_gap_m=0.0,
+            lat=info_end.get("lat"), lon=info_end.get("lon"),
             speed_kmh     = last_seg.get("speed_normal" if last_fwd else "speed_reverse",30.0),
             gradient_perm = last_seg.get("grad_normal"  if last_fwd else "grad_reverse", 0.0),
             electrification=last_seg.get("electrification","NONE"),
@@ -368,7 +356,6 @@ class TrackProfile:
                 grad            = float(r["gradient_perm"]) / 1000.0,
                 electrification = str(r.get("electrification","NONE")),
                 recuperation    = int(r.get("recuperation",0)),
-                ue_gap_m        = float(r.get("ue_gap_m",0.0)),
             ))
         return segs
 
@@ -389,6 +376,27 @@ class TrackProfile:
         lims = [s["v_limit"] for s in self.segments
                 if lo <= s["km_end"]+1e-6 and hi >= s["km_start"]-1e-6]
         return min(lims) if lims else (self.segments[-1]["v_limit"] if self.segments else 0.0)
+
+    def get_incompatible_gap(self, current_km: float, comp_sys: list[str]) -> float:
+        if comp_sys is None: return 0.0
+        gap = 0.0
+        curr_idx = -1
+        for i, s in enumerate(self.segments):
+            if s["km_start"] <= current_km <= s["km_end"] + 1e-6:
+                curr_idx = i
+                break
+        if curr_idx == -1: return 0.0
+
+        s = self.segments[curr_idx]
+        if s["electrification"] in comp_sys: return 0.0
+
+        gap += s["km_end"] - current_km
+        for i in range(curr_idx + 1, len(self.segments)):
+            s = self.segments[i]
+            if s["electrification"] in comp_sys: break
+            gap += s["km_end"] - s["km_start"]
+
+        return gap * 1000.0
 
     @property
     def n_mandatory(self) -> int:
@@ -421,7 +429,8 @@ class TrainSimulator:
     def __init__(self, mass_kg, length_m, max_power_kw, aux_power_kw,
                  max_accel, max_decel, traction_type, efficiency,
                  max_speed_kmh: float = 160.0,
-                 coast_threshold_m: float = 500.0):
+                 coast_threshold_m: float = 500.0,
+                 comp_sys: list[str] = None):
         self.mass_kg  = mass_kg
         self.eff_mass = mass_kg * 1.08
         # Dynamic Davis coefficients
@@ -439,6 +448,7 @@ class TrainSimulator:
         self.length_m   = length_m
         self.max_v      = max_speed_kmh / 3.6   # vehicle max speed [m/s]
         self.coast_threshold_m = coast_threshold_m
+        self.comp_sys   = comp_sys
 
     def _res(self, v: float) -> float:
         return self.A + self.B * v + self.C * v * v
@@ -482,7 +492,7 @@ class TrainSimulator:
             rear_km = max(0.0, km - self.length_m / 1000.0)
             seg     = track.seg_at(km)
 
-            # --- BUG FIX: Prune passed stops to prevent desync/infinite stalls ---
+            # --- Prune passed stops to prevent desync/infinite stalls ---
             while stops_km and km > stops_km[0] + 0.1:
                 stops_km.pop(0)
 
@@ -494,15 +504,15 @@ class TrainSimulator:
 
             # Electrification guard
             coasting = False
-            if self.traction == "ELECTRIC" and electr == "NONE":
-                gap_m = seg.get("ue_gap_m", 0.0)
+            if self.traction == "ELECTRIC" and (self.comp_sys is not None and electr not in self.comp_sys):
+                gap_m = track.get_incompatible_gap(km, self.comp_sys)
                 if gap_m <= self.coast_threshold_m:
                     coasting = True
                 else:
                     raise RuntimeError(
-                        f"⚡ Electric vehicle on non-electrified track at km {km:.2f} "
+                        f"⚡ Electric vehicle on incompatible track ({electr}) at km {km:.2f} "
                         f"(gap {gap_m/1000:.1f} km > coast limit {self.coast_threshold_m/1000:.1f} km). "
-                        "Raise the coast threshold, enable 'Prefer electrified route', "
+                        "Raise the coast threshold, enable 'Prefer compatible track', "
                         "or select a diesel vehicle.")
 
             f_grad    = self.mass_kg * g * slope
@@ -534,7 +544,7 @@ class TrainSimulator:
                 f_res = self._res(v)
                 nat_d = (f_res + f_grad) / self.eff_mass
                 brk   = max(0.0, min(self.max_decel, (v - max_safe) - nat_d))
-                if recup: reg_p = self.eff_mass * brk * v * self.regen_eff
+                if recup and not coasting: reg_p = self.eff_mass * brk * v * self.regen_eff
                 v = max(0.0, v - (brk + nat_d))
 
             elif v < min(v_lim, max_safe) - 1e-4:
@@ -554,7 +564,7 @@ class TrainSimulator:
             e_j  += (mech_p / self.trac_eff + self.aux_w)
             r_j  += reg_p; dist += v * dt; t_s += dt
 
-            # Dwell at stop (increased tolerance to 0.1 km / 100m to prevent overshoot lock)
+            # Dwell at stop
             if v < 0.5 and stops_km and abs(km - stops_km[0]) <= 0.1:
                 v = 0.0
                 if hist is not None:
@@ -947,7 +957,7 @@ st.markdown("""<style>
 [data-testid="stSidebar"]{background:#F1F5F9}
 .stButton>button{border-radius:8px;font-weight:600;transition:all .15s}
 .stButton>button:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.15)}
-.block-container{padding-top:1.5rem}
+.block-container{padding-top:3.5rem; padding-bottom:2rem}
 .stTabs [data-baseweb="tab"]{font-weight:600;font-size:.92rem}
 .sec{font-size:.92rem;font-weight:700;color:#1E3A5F;
      border-left:3px solid #2563EB;padding-left:8px;margin:14px 0 6px}
@@ -962,7 +972,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 for _k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result",
-           "elec_analysis","op_start","op_end"):
+           "elec_analysis","op_start","op_end","comp_sys"):
     if _k not in st.session_state: st.session_state[_k] = None
 if not isinstance(st.session_state.via_ops, list): st.session_state.via_ops = []
 
@@ -980,7 +990,7 @@ with st.sidebar:
     if uploaded:
         xp = load_xml_from_upload(uploaded)
         if xp and xp != st.session_state.xml_path:
-            for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis"):
+            for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys"):
                 st.session_state[k] = None if k != "via_ops" else []
             st.session_state.xml_path = xp
         xml_path = st.session_state.xml_path
@@ -990,7 +1000,7 @@ with st.sidebar:
         if local:
             sel = st.selectbox("Or pick local file", local, label_visibility="collapsed")
             if sel != st.session_state.xml_path:
-                for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis"):
+                for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys"):
                     st.session_state[k] = None if k != "via_ops" else []
                 st.session_state.xml_path = sel
             xml_path = sel
@@ -1016,34 +1026,7 @@ with st.sidebar:
     else:
         st.info("Upload a DYPOD railML file to begin."); st.stop()
 
-    # 2. Route
-    st.markdown('<div class="sec">🗺️ Route</div>', unsafe_allow_html=True)
-
-    def _station_selector(label: str, key_q: str, key_sel: str) -> str | None:
-        query   = st.text_input(label, key=key_q, placeholder="Type to search…")
-        results = parser.search_stations(query)
-        if not results:
-            if query.strip(): st.caption("⚠️ No matching stations")
-            return None
-        options = {nm: oid for oid, nm in results}
-        chosen  = st.selectbox(f"↳ {label}", list(options.keys()),
-                                key=key_sel, label_visibility="collapsed")
-        return options.get(chosen)
-
-    op_start = _station_selector("🔍 Departure station", "q_dep", "sel_dep")
-    op_end   = _station_selector("🔍 Arrival station",   "q_arr", "sel_arr")
-
-    st.markdown("**⚡ Electrified route preference**")
-    elec_reroute = st.toggle("Prefer electrified track", value=False,
-                              help="Penalises non-electrified segments in route search.")
-    pen_km = 100
-    if elec_reroute:
-        pen_km = st.slider("Detour tolerance (km per NONE segment)", 10, 500, 100, 10)
-
-    btn_profile = st.button("🗺️  Build Track Profile", use_container_width=True, type="primary",
-                             disabled=not(op_start and op_end and op_start != op_end))
-
-    # 3. Vehicle
+    # 2. Vehicle
     st.markdown('<div class="sec">🚃 Vehicle</div>', unsafe_allow_html=True)
     veh = st.selectbox("Preset", ["Custom"] + list(PREDEFINED_VEHICLES.keys()),
                        label_visibility="collapsed")
@@ -1069,6 +1052,43 @@ with st.sidebar:
                 f"{power} kW  |  {mass:,} kg")
     unit_lbl = "L fuel" if traction == "DIESEL" else "kWh"
 
+    if traction == "ELECTRIC":
+        if veh == "Custom":
+            comp_sys = st.multiselect("Compatible catenary systems", ["3,000V/0Hz", "25,000V/50Hz", "1,500V/0Hz", "15,000V/16.7Hz"], default=["3,000V/0Hz", "25,000V/50Hz"])
+        else:
+            comp_sys = st.multiselect("Compatible catenary systems", ["3,000V/0Hz", "25,000V/50Hz", "1,500V/0Hz", "15,000V/16.7Hz"], default=p.get("systems", []))
+    else:
+        comp_sys = None
+
+    # 3. Route
+    st.markdown('<div class="sec">🗺️ Route</div>', unsafe_allow_html=True)
+
+    station_dict = {nm: oid for nm, oid in parser.station_list}
+    station_names = list(station_dict.keys())
+
+    if station_names:
+        op_start_name = st.selectbox("🔍 Departure station", station_names, index=0)
+        op_end_name   = st.selectbox("🔍 Arrival station", station_names, index=len(station_names)-1)
+
+        op_start = station_dict.get(op_start_name)
+        op_end   = station_dict.get(op_end_name)
+    else:
+        op_start, op_end = None, None
+        st.warning("No passenger stations found in the data.")
+
+    if traction == "ELECTRIC":
+        st.markdown("**⚡ Compatible route preference**")
+        elec_reroute = st.toggle("Prefer compatible track", value=False,
+                                  help="Penalises incompatible/non-electrified segments in route search.")
+        pen_km = st.slider("Detour tolerance (km per incompatible segment)", 10, 500, 100, 10) if elec_reroute else 0
+    else:
+        elec_reroute = False
+        pen_km = 0
+
+    btn_profile = st.button("🗺️  Build Track Profile", use_container_width=True, type="primary",
+                             disabled=not(op_start and op_end and op_start != op_end))
+
+
     # 4. Simulation
     st.markdown('<div class="sec">⚙️ Simulation</div>', unsafe_allow_html=True)
     dwell     = st.number_input("Station dwell (s)", value=30, step=5)
@@ -1077,15 +1097,13 @@ with st.sidebar:
                           horizontal=True)
     stop_prob = st.slider("Request-stop probability", 0.0, 1.0, 0.5, 0.05,
                            disabled=(stop_mode != "random"))
-    x_axis    = st.radio("Kinematic X-axis", ["Distance (km)","Time (MM:SS)"],
-                          horizontal=True)
 
     coast_threshold_m = 500.0
     if traction == "ELECTRIC":
         st.markdown("**⚡ Electric coasting**")
-        coast_km = st.slider("Max coastable non-electrified gap (km)", 0.1, 10.0, 0.5, 0.1,
+        coast_km = st.slider("Max coastable incompatible gap (km)", 0.1, 10.0, 0.5, 0.1,
                               help="Electric vehicles coast (no traction, aux only) through "
-                                   "non-electrified gaps shorter than this.")
+                                   "incompatible/non-electrified gaps shorter than this.")
         coast_threshold_m = coast_km * 1000.0
 
     # 5. Monte Carlo
@@ -1094,6 +1112,9 @@ with st.sidebar:
     mc_probs = st.multiselect("Probabilities to sweep",
                                [1.0,0.8,0.6,0.4,0.2,0.0],
                                default=[1.0,0.8,0.6,0.4,0.2,0.0])
+
+    st.markdown('<div class="sec">📊 Display Options</div>', unsafe_allow_html=True)
+    x_axis_choice = st.radio("Kinematic X-axis", ["Distance (km)", "Time (MM:SS)"])
 
     cb1, cb2 = st.columns(2)
     btn_run = cb1.button("▶️ Run",  use_container_width=True,
@@ -1106,21 +1127,23 @@ with st.sidebar:
 if btn_profile and op_start and op_end:
     pen = pen_km * 1000.0 if elec_reroute else 0.0
     with st.spinner("Finding path and building profile…"):
-        ea  = parser.analyse_electrification(op_start, op_end)
+        ea  = parser.analyse_electrification(op_start, op_end, comp_sys)
         df  = parser.build_profile(op_start, op_end,
                                     via_ops=st.session_state.via_ops or [],
-                                    unelec_penalty_m=pen)
+                                    penalty_m=pen, comp_sys=comp_sys)
     if df.empty: st.error("No path found between the selected stations.")
     else:
         st.session_state.update(profile_df=df, op_start=op_start, op_end=op_end,
-                                 elec_analysis=ea, rep_result=None, mc_result=None)
+                                 elec_analysis=ea, rep_result=None, mc_result=None,
+                                 comp_sys=comp_sys)
 
 if btn_run and st.session_state.profile_df is not None:
     with st.spinner("Running kinematic physics simulation…"):
         try:
             track = TrackProfile(st.session_state.profile_df)
             sim   = TrainSimulator(mass, length, power, aux_power, accel, decel,
-                                   traction, efficiency, max_speed, coast_threshold_m)
+                                   traction, efficiency, max_speed, coast_threshold_m,
+                                   comp_sys=st.session_state.comp_sys)
             hist, snames, stats = sim.run(track, stop_mode=stop_mode, stop_prob=stop_prob,
                                            dwell=dwell, record=True)
             st.session_state.rep_result = dict(hist=hist, stop_names=snames, stats=stats,
@@ -1134,7 +1157,8 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
     try:
         track = TrackProfile(st.session_state.profile_df)
         sim   = TrainSimulator(mass, length, power, aux_power, accel, decel,
-                               traction, efficiency, max_speed, coast_threshold_m)
+                               traction, efficiency, max_speed, coast_threshold_m,
+                               comp_sys=st.session_state.comp_sys)
         rows_mc = []
         total_runs = len(mc_probs) * int(mc_n)
         pb = st.sidebar.progress(0.0, text="Monte Carlo running…")
@@ -1176,6 +1200,7 @@ tab_prof, tab_edit, tab_run_t, tab_mc_t = st.tabs([
 with tab_prof:
     df  = st.session_state.profile_df
     ea  = st.session_state.elec_analysis
+    cs  = st.session_state.comp_sys
 
     if df is None:
         st.markdown("### 👈 Search for stations in the sidebar and click **Build Track Profile**")
@@ -1185,28 +1210,29 @@ with tab_prof:
 
     total_km = float(df["cum_km"].max())
     stops_x  = df[df["stop_type"]=="X"]; stops_r = df[df["stop_type"]=="R"]
-    ue_km    = df[df["electrification"]=="NONE"]["length_m"].sum()/1000
-    elec_km  = total_km - ue_km
+
+    incomp_km = sum(s.get("length_m", 0) for s in df.to_dict('records') if cs is not None and s.get("electrification") not in cs) / 1000
+    comp_km   = total_km - incomp_km
     sn = df["station_name"].iloc[0]; en = df["station_name"].iloc[-1]
 
     st.markdown(f"### 📍 {sn}  →  {en}")
 
     # Electrification alerts
     if ea is not None and traction == "ELECTRIC":
-        ue = ea["normal_ue_km"]; gw = ea["gateway_km"]
+        ue = ea["incomp_km"]; gw = ea["gateway_km"]
         coast_lbl = f"{coast_threshold_m/1000:.1f} km"
         if ue == 0:
-            st.markdown('<div class="ok-box">✅ <b>Fully electrified route.</b></div>', unsafe_allow_html=True)
+            st.markdown('<div class="ok-box">✅ <b>Fully compatible electrified route.</b></div>', unsafe_allow_html=True)
         elif ue <= coast_threshold_m/1000:
-            st.markdown(f'<div class="ok-box">⚡ Short non-electrified gap: <b>{ue:.2f} km</b> — within coasting limit ({coast_lbl}). Vehicle will coast on inertia.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="ok-box">⚡ Short incompatible gap: <b>{ue:.2f} km</b> — within coasting limit ({coast_lbl}). Vehicle will coast on inertia.</div>', unsafe_allow_html=True)
         elif abs(gw - ue) < 0.1 and gw > 0:
-            st.markdown(f'<div class="warn-box">⚠️ Unavoidable run-in: <b>{gw:.1f} km</b> non-electrified. No electrified exit from <b>{sn}</b>. Raise coasting limit or use diesel.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="warn-box">⚠️ Unavoidable run-in: <b>{gw:.1f} km</b> incompatible track. No compatible exit from <b>{sn}</b>. Raise coasting limit or use diesel.</div>', unsafe_allow_html=True)
         elif ea.get("has_alternative") and not elec_reroute:
-            st.markdown(f'<div class="warn-box">⚡ <b>{ue:.1f} km non-electrified.</b> Enable <b>Prefer electrified route</b> to save <b>{ea["elec_saving_km"]:.1f} km</b> (+{ea["detour_km"]:.0f} km detour). Or raise coasting limit ({coast_lbl}).</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="warn-box">⚡ <b>{ue:.1f} km incompatible track.</b> Enable <b>Prefer compatible track</b> to save <b>{ea["saving_km"]:.1f} km</b> (+{ea["detour_km"]:.0f} km detour). Or raise coasting limit ({coast_lbl}).</div>', unsafe_allow_html=True)
         elif elec_reroute and ea.get("has_alternative"):
-            st.markdown(f'<div class="ok-box">✅ <b>Electrified routing active.</b> Saved <b>{ea["elec_saving_km"]:.1f} km</b> non-electrified (+{ea["detour_km"]:.0f} km detour). Remaining: <b>{ea["penalised_ue_km"]:.1f} km</b> unavoidable (coast limit: {coast_lbl}).</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="ok-box">✅ <b>Compatible routing active.</b> Saved <b>{ea["saving_km"]:.1f} km</b> incompatible track (+{ea["detour_km"]:.0f} km detour). Remaining: <b>{ea["penalised_incomp_km"]:.1f} km</b> unavoidable (coast limit: {coast_lbl}).</div>', unsafe_allow_html=True)
         elif ue > 0:
-            st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km non-electrified</b> exceeds coasting limit ({coast_lbl}). Raise limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km incompatible track</b> exceeds coasting limit ({coast_lbl}). Raise limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
 
     # KPI row
     kc = st.columns(6)
@@ -1215,9 +1241,14 @@ with tab_prof:
     kc[2].markdown(kpi_card(str(len(stops_r)),"Request halts (R)"), unsafe_allow_html=True)
     kc[3].markdown(kpi_card(f"{df['speed_kmh'].max():.0f} km/h","Max speed"), unsafe_allow_html=True)
     kc[4].markdown(kpi_card(f"{df['gradient_perm'].abs().max():.0f} ‰","Max gradient"), unsafe_allow_html=True)
-    kc[5].markdown(kpi_card(f"{elec_km:.0f} km",f"Electrified ({100*elec_km/total_km:.0f}%)",
-                             delta=(f"⚠️ {ue_km:.0f} km non-electrified" if ue_km>0 else "✅ Fully electrified"),
-                             color=(C["red"] if ue_km>0 else C["green"])), unsafe_allow_html=True)
+
+    if traction == "ELECTRIC":
+        kc[5].markdown(kpi_card(f"{comp_km:.0f} km",f"Compatible ({100*comp_km/total_km if total_km>0 else 0:.0f}%)",
+                                 delta=(f"⚠️ {incomp_km:.0f} km incompatible" if incomp_km>0 else "✅ Fully compatible"),
+                                 color=(C["red"] if incomp_km>0 else C["green"])), unsafe_allow_html=True)
+    else:
+        kc[5].markdown(kpi_card(f"{total_km:.0f} km", "Diesel mode", color=C["green"]), unsafe_allow_html=True)
+
     st.write("")
 
     st.plotly_chart(make_profile_chart(df), use_container_width=True)
@@ -1274,12 +1305,12 @@ with tab_prof:
     # Full data table
     with st.expander("📋 Full profile data table"):
         cols=["cum_km","station_name","stop_type","speed_kmh","gradient_perm",
-              "electrification","recuperation","length_m","ue_gap_m","n_tracks"]
+              "electrification","recuperation","length_m","n_tracks"]
         cols=[c for c in cols if c in df.columns]
         ren=dict(cum_km="km [km]",station_name="Waypoint",stop_type="Stop",
                  speed_kmh="Speed [km/h]",gradient_perm="Grad [‰]",
                  electrification="Electrif.",recuperation="Recup.",
-                 length_m="Length [m]",ue_gap_m="UE gap [m]",n_tracks="Tracks")
+                 length_m="Length [m]",n_tracks="Tracks")
         st.dataframe(df[cols].rename(columns=ren), use_container_width=True,
                      hide_index=True, height=340)
         st.download_button("⬇️ Download profile CSV",
@@ -1297,19 +1328,18 @@ with tab_edit:
     # Via waypoints
     st.markdown('<div class="sec">📍 Via Waypoints</div>', unsafe_allow_html=True)
     st.caption("Force the route through specific intermediate stations. Rebuild after changes.")
-    qv  = st.text_input("Search waypoint to add", placeholder="e.g. Pardubice hl.n.", key="q_via")
-    rv  = parser.search_stations(qv) if qv.strip() else []
+
+    station_dict = {nm: oid for nm, oid in parser.station_list}
+    station_names = list(station_dict.keys())
+
     cva, cvb = st.columns([3,1])
-    via_sel = None
-    if rv:
-        via_opts = {nm: oid for oid, nm in rv}
-        via_sel  = cva.selectbox("Select", list(via_opts.keys()),
-                                  label_visibility="collapsed", key="via_opt")
-    if cvb.button("➕ Add", use_container_width=True, disabled=not rv):
-        if via_sel:
-            via_op = via_opts.get(via_sel)
-            if via_op and via_op not in st.session_state.via_ops:
-                st.session_state.via_ops.append(via_op); st.rerun()
+    via_sel_name = cva.selectbox("Search waypoint to add", options=station_names, index=None, placeholder="Type to search e.g. Pardubice...", label_visibility="collapsed", key="via_opt")
+
+    if cvb.button("➕ Add", use_container_width=True, disabled=not via_sel_name):
+        via_op = station_dict.get(via_sel_name)
+        if via_op and via_op not in st.session_state.via_ops:
+            st.session_state.via_ops.append(via_op)
+            st.rerun()
 
     if st.session_state.via_ops:
         st.markdown("**Via waypoints (in order):**")
@@ -1401,7 +1431,7 @@ with tab_run_t:
         st.caption("No intermediate stops served (express run).")
 
     if hist:
-        fig_kin = make_kinematic_chart(hist, snames, df_p, x_axis=x_axis)
+        fig_kin = make_kinematic_chart(hist, snames, df_p, x_axis=x_axis_choice)
         st.plotly_chart(fig_kin, use_container_width=True)
 
         csv_kin = pd.DataFrame(hist).to_csv(index=False).encode()
@@ -1416,7 +1446,7 @@ with tab_run_t:
             ec1.metric("Recuperation share",  f"{rp:.1f}%")
             ec2.metric("Specific net energy", f"{spec:.3f} kWh/km")
             if _tr == "DIESEL":
-                ec3.metric("Specific fuel", f"{consumed/tot_km*1000:.1f} mL/km")
+                ec3.metric("Specific fuel", f"{consumed/tot_km:.3f} L/km")
                 ec4.metric("CO₂ (est.)", f"{consumed*2.65:.0f} kg",
                             help="Diesel combustion ≈ 2.65 kg CO₂/L")
             else:
