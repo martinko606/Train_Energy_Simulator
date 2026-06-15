@@ -189,7 +189,7 @@ class DYPODParser:
             lo       = line.find("lineOperation")
             lp_spd   = int(lp.get("maxSpeed", 0)) if lp is not None else 0
             self._line_max[ne_ref] = lp_spd
-            gr     = grad_map.get(ne_ref, {"normal": 0.0, "reverse": 0.0})
+            gr       = grad_map.get(ne_ref, {"normal": 0.0, "reverse": 0.0})
             electr = elec_map.get(ne_ref, "NONE")
             self.seg_props[ne_ref] = dict(
                 length_m       = length_m,
@@ -474,7 +474,7 @@ class TrainSimulator:
             iters += 1
             if iters > max_iters:
                 raise RuntimeError(f"Simulation stalled at km {dist/1000:.2f}. "
-                                    "Check that the vehicle has enough power for the gradient.")
+                                   "Check that the vehicle has enough power for the gradient.")
 
             km      = dist / 1000.0
             rear_km = max(0.0, km - self.length_m / 1000.0)
@@ -1057,7 +1057,7 @@ with st.sidebar:
         power, aux_power       = p["power"], p["aux_power"]
         accel, decel, efficiency, max_speed = p["accel"], p["decel"], p["efficiency"], p["max_speed"]
         diesel_d = st.number_input("Diesel density (kWh/L)", value=10.0) if traction=="DIESEL" else 10.0
-        st.info(f"**{veh}**  |  {traction}  |  {max_speed} km/h  |  "
+        st.info(f"**{veh}** |  {traction}  |  {max_speed} km/h  |  "
                 f"{power} kW  |  {mass:,} kg")
     unit_lbl = "L fuel" if traction == "DIESEL" else "kWh"
 
@@ -1195,6 +1195,8 @@ with tab_prof:
             st.markdown(f'<div class="warn-box">⚠️ Unavoidable run-in: <b>{gw:.1f} km</b> non-electrified. No electrified exit from <b>{sn}</b>. Raise coasting limit or use diesel.</div>', unsafe_allow_html=True)
         elif ea.get("has_alternative") and not elec_reroute:
             st.markdown(f'<div class="warn-box">⚡ <b>{ue:.1f} km non-electrified.</b> Enable <b>Prefer electrified route</b> to save <b>{ea["elec_saving_km"]:.1f} km</b> (+{ea["detour_km"]:.0f} km detour). Or raise coasting limit ({coast_lbl}).</div>', unsafe_allow_html=True)
+        elif elec_reroute and ea.get("has_alternative"):
+            st.markdown(f'<div class="ok-box">✅ <b>Electrified routing active.</b> Saved <b>{ea["elec_saving_km"]:.1f} km</b> non-electrified (+{ea["detour_km"]:.0f} km detour). Remaining: <b>{ea["penalised_ue_km"]:.1f} km</b> unavoidable (coast limit: {coast_lbl}).</div>', unsafe_allow_html=True)
         elif ue > 0:
             st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km non-electrified</b> exceeds coasting limit ({coast_lbl}). Raise limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
 
@@ -1241,6 +1243,8 @@ with tab_prof:
             return f"rgba({r},{g},{b},0.28)"
         icons = spd_df["stop_type"].map({"X":"🚉","R":"🛑"}).fillna("")
         labels = icons + " " + spd_df["station_name"].str.strip()
+
+        # FIXED: Removed dynamic alpha colors that crash Plotly Tables on some environments
         fig_tbl = go.Figure(go.Table(
             columnwidth=[55,200,80,70,160,70],
             header=dict(values=["km","Waypoint","Speed [km/h]","Grad [‰]","Electrif.","Tracks"],
@@ -1253,7 +1257,7 @@ with tab_prof:
                         fill_color=[["#F8FAFC"]*len(spd_df), ["#F8FAFC"]*len(spd_df),
                                     [_sclr(v) for v in spd_df["speed_kmh"]],
                                     ["#F8FAFC"]*len(spd_df),
-                                    [elec_color(e)+"44" for e in spd_df["electrification"]],
+                                    ["#F8FAFC"]*len(spd_df),  # Safe solid color
                                     ["#F8FAFC"]*len(spd_df)],
                         font=dict(size=11), align="left", height=24)))
         fig_tbl.update_layout(height=min(60+len(spd_df)*26,440),
@@ -1309,7 +1313,7 @@ with tab_edit:
             if e2.button("↑", key=f"up_{i}", disabled=i==0):
                 st.session_state.via_ops[i], st.session_state.via_ops[i-1] = \
                     st.session_state.via_ops[i-1], st.session_state.via_ops[i]; st.rerun()
-            e3.markdown(f"📍 **{info.get('name',vid)}**  "
+            e3.markdown(f"📍 **{info.get('name',vid)}** "
                          f"<span style='color:{C['grey']};font-size:.8rem'>"
                          f"{', '.join(info.get('types',[]))}</span>", unsafe_allow_html=True)
             if e4.button("✕", key=f"rm_{i}", use_container_width=True):
@@ -1336,7 +1340,7 @@ with tab_edit:
         edit_cols = ["station_name","stop_type","speed_kmh","gradient_perm","electrification","length_m"]
         edit_cols = [c for c in edit_cols if c in df.columns]
         edited = st.data_editor(df[edit_cols].copy(), column_config={
-            "station_name":    st.column_config.TextColumn("Waypoint",     disabled=True, width="large"),
+            "station_name":    st.column_config.TextColumn("Waypoint",      disabled=True, width="large"),
             "stop_type":       st.column_config.SelectboxColumn("Stop",    options=["X","R",""],  width="small"),
             "speed_kmh":       st.column_config.NumberColumn("Speed [km/h]", min_value=0, max_value=350, width="small"),
             "gradient_perm":   st.column_config.NumberColumn("Grad [‰]",  disabled=True, width="small"),
