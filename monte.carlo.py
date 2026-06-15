@@ -459,12 +459,14 @@ class TrainSimulator:
                     stop_mode == "all" or
                     (stop_mode == "random" and random.random() <= stop_prob)))
             if will: stops_km.append(km); stop_names.append(st["name"])
+
         # Always stop at destination
         if track.total_km > 0:
             stops_km.append(track.total_km)
             stop_names.append("Destination")
 
         v = dist = e_j = r_j = t_s = 0.0
+        dt = 1.0
         max_iters = int(total_m / 0.1) + 36_000
         iters = 0
         hist = {k: [] for k in ("time_s","km","v_kmh","v_limit_kmh",
@@ -479,6 +481,10 @@ class TrainSimulator:
             km      = dist / 1000.0
             rear_km = max(0.0, km - self.length_m / 1000.0)
             seg     = track.seg_at(km)
+
+            # --- BUG FIX: Prune passed stops to prevent desync/infinite stalls ---
+            while stops_km and km > stops_km[0] + 0.1:
+                stops_km.pop(0)
 
             # Track limit capped to vehicle max speed
             v_lim   = min(track.v_limit_span(km, rear_km), self.max_v)
@@ -504,7 +510,7 @@ class TrainSimulator:
 
             # Braking look-ahead: use nearest upcoming stop
             max_safe = v_lim
-            next_stop = next((s for s in stops_km if s >= km - 0.01), None)
+            next_stop = stops_km[0] if stops_km else None
             if next_stop is not None:
                 d2s = max(0.0, (next_stop - km) * 1000.0)
                 max_safe = min(max_safe, math.sqrt(max(0.0, 2.0 * eff_decel * d2s)))
@@ -546,10 +552,10 @@ class TrainSimulator:
                 mech_p = max(0.0, act_f * v)
 
             e_j  += (mech_p / self.trac_eff + self.aux_w)
-            r_j  += reg_p; dist += v; t_s += 1.0
+            r_j  += reg_p; dist += v * dt; t_s += dt
 
-            # Dwell at stop
-            if v < 0.5 and stops_km and abs(km - stops_km[0]) <= 0.05:
+            # Dwell at stop (increased tolerance to 0.1 km / 100m to prevent overshoot lock)
+            if v < 0.5 and stops_km and abs(km - stops_km[0]) <= 0.1:
                 v = 0.0
                 if hist is not None:
                     for pass_no in range(2):
@@ -563,10 +569,12 @@ class TrainSimulator:
                         if pass_no == 0: e_j += self.aux_w * dwell; t_s += dwell
                 else:
                     e_j += self.aux_w * dwell; t_s += dwell
-                # Check destination reached
-                if abs(km - track.total_km) <= 0.05:
-                    dist = total_m; break
+
                 stops_km.pop(0)
+
+                # Check destination reached
+                if not stops_km or abs(km - track.total_km) <= 0.1:
+                    dist = total_m; break
 
         return hist, stop_names, dict(
             gross_kwh=e_j/3_600_000.0, regen_kwh=r_j/3_600_000.0,
@@ -1230,7 +1238,7 @@ with tab_prof:
     if not map_df.empty:
         with st.expander("🗺️ Route map", expanded=True):
             st.plotly_chart(make_route_map(df, st.session_state.via_ops or [], parser),
-                            use_container_width=True)
+                            use_container_width=True, key="route_map_tab1")
 
     # Speed summary table (pure Plotly — no matplotlib)
     with st.expander("⚡ Speed & electrification summary"):
@@ -1244,7 +1252,6 @@ with tab_prof:
         icons = spd_df["stop_type"].map({"X":"🚉","R":"🛑"}).fillna("")
         labels = icons + " " + spd_df["station_name"].str.strip()
 
-        # FIXED: Removed dynamic alpha colors that crash Plotly Tables on some environments
         fig_tbl = go.Figure(go.Table(
             columnwidth=[55,200,80,70,160,70],
             header=dict(values=["km","Waypoint","Speed [km/h]","Grad [‰]","Electrif.","Tracks"],
@@ -1332,7 +1339,7 @@ with tab_edit:
         map_df2 = df.dropna(subset=["lat","lon"])
         if not map_df2.empty:
             st.plotly_chart(make_route_map(df, st.session_state.via_ops or [], parser),
-                            use_container_width=True)
+                            use_container_width=True, key="route_map_tab2")
 
         # Override table
         st.markdown('<div class="sec">📝 Speed & Stop Overrides</div>', unsafe_allow_html=True)
