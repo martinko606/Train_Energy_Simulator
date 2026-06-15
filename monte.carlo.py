@@ -129,7 +129,7 @@ class DYPODParser:
         vals_o = self._seg_speeds.get(ne_ref, {}).get(other, [])
         if vals_o: return float(min(vals_o))
         lp = self._line_max.get(ne_ref, 0)
-        return float(lp) if lp > 0 else 30.0
+        return float(lp) if lp > 0 else 40.0
 
     def _parse_ops(self):
         for op in self._root.iter("operationalPoint"):
