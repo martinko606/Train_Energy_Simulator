@@ -520,7 +520,7 @@ class TrainSimulator:
             rear_km = max(0.0, km - self.length_m / 1000.0)
             seg     = track.seg_at(km)
 
-            # --- Prune passed stops to prevent desync/infinite stalls ---
+            # --- BUG FIX: Prune passed stops to prevent desync/infinite stalls ---
             while stops_km and km > stops_km[0] + 0.1:
                 stops_km.pop(0)
 
