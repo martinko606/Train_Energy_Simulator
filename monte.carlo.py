@@ -544,16 +544,17 @@ class TrainSimulator:
 
             v_eff = max(v, 0.5); mech_p = reg_p = 0.0
 
-            if coasting:
-                f_res = self._res(v)
-                v = max(0.0, v - (f_res + f_grad) / self.eff_mass)
-
-            elif v > max_safe + 1e-4:
+            if v > max_safe + 1e-4:
+                # Braking/Safety overrides coasting!
                 f_res = self._res(v)
                 nat_d = (f_res + f_grad) / self.eff_mass
                 brk   = max(0.0, min(self.max_decel, (v - max_safe) - nat_d))
                 if recup and not coasting: reg_p = self.eff_mass * brk * v * self.regen_eff
                 v = max(0.0, v - (brk + nat_d))
+
+            elif coasting:
+                f_res = self._res(v)
+                v = max(0.0, v - (f_res + f_grad) / self.eff_mass)
 
             elif v < min(v_lim, max_safe) - 1e-4:
                 f_res  = self._res(v)
