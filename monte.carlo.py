@@ -9,6 +9,7 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Live station search with dropdown suggestions
 • Interactive profile editor with via-waypoints + table overrides
 • Smart electrified-route search (penalty-based rerouting for incompatible catenary)
+• Multi-Leg Scenario Builder (Round-Trips, Custom Itineraries)
 • Electric coasting through short incompatible/non-electrified gaps (configurable)
 • Physics simulation with dynamic Davis equation & vehicle max-speed cap
 • Kinematic chart with time/distance X-axis toggle & station annotations
@@ -63,14 +64,6 @@ class DYPODParser:
     """
     Parses a DYPOD railML 3.2 export and exposes a graph of the Czech
     railway meso-level network.
-
-    Speed strategy
-    --------------
-    Each meso-level segment can contain multiple track sub-elements.
-    We take the MINIMUM speedSection value across all sub-elements per
-    direction (most restrictive value any train must honour).
-    For segments with no speedSection we fall back to
-    linePerformance.maxSpeed, then 30 km/h (sidings/depots).
     """
 
     def __init__(self, xml_path: str):
@@ -129,7 +122,7 @@ class DYPODParser:
         vals_o = self._seg_speeds.get(ne_ref, {}).get(other, [])
         if vals_o: return float(min(vals_o))
         lp = self._line_max.get(ne_ref, 0)
-        return float(lp) if lp > 0 else 40.0
+        return float(lp) if lp > 0 else 30.0
 
     def _parse_ops(self):
         for op in self._root.iter("operationalPoint"):
@@ -157,7 +150,6 @@ class DYPODParser:
             if ne_ref not in grad_map:
                 grad_map[ne_ref] = {"normal": 0.0, "reverse": 0.0}
 
-            # Safely assign normal and reverse gradients
             if app_dir in ("normal", "both", ""):
                 grad_map[ne_ref]["normal"] = grad
                 grad_map[ne_ref]["reverse"] = -grad
@@ -189,8 +181,7 @@ class DYPODParser:
             lel      = line.find("length")
             length_m = float(lel.get("value", 0)) if lel is not None else len_map.get(ne_ref, 0.0)
 
-            if length_m <= 0.0:
-                length_m = 10.0  # Failsafe to prevent 0-cost shortcuts in Dijkstra
+            if length_m <= 0.0: length_m = 10.0  # Failsafe
 
             lp       = line.find("linePerformance")
             ll       = line.find("lineLayout")
@@ -234,7 +225,6 @@ class DYPODParser:
                 self.station_list.append((info["name"], oid))
         self.station_list.sort(key=lambda x: x[0])
 
-    # ── Dijkstra ──────────────────────────────────────────────────────────────
     def dijkstra(self, start: str, end: str,
                  penalty_m: float = 0.0, comp_sys: list[str] = None) -> tuple[float | None, list]:
         if start not in self.graph: return None, []
@@ -255,10 +245,7 @@ class DYPODParser:
                                     path + [dict(from_op=node, **edge)]))
         return None, []
 
-    # ── Electrification analysis ───────────────────────────────────────────────
-    def analyse_electrification(self, start_op: str, end_op: str, via_ops: list[str] = None, comp_sys: list[str] = None) -> dict:
-        waypoints = [start_op] + (via_ops or []) + [end_op]
-
+    def analyse_electrification(self, waypoints: list[str], comp_sys: list[str] = None) -> dict:
         p_normal = []
         for i in range(len(waypoints) - 1):
             _, path = self.dijkstra(waypoints[i], waypoints[i + 1], 0, comp_sys)
@@ -295,19 +282,12 @@ class DYPODParser:
                     detour_km=round(detour,1), saving_km=round(saving,1),
                     has_alternative=has_alt)
 
-    # ── Profile builder ────────────────────────────────────────────────────────
-    def build_profile(self, start_op: str, end_op: str,
-                      via_ops: list[str] | None = None,
-                      penalty_m: float = 0.0, comp_sys: list[str] = None) -> pd.DataFrame:
-        waypoints = [start_op] + (via_ops or []) + [end_op]
+    def build_profile(self, waypoints: list[str], penalty_m: float = 0.0, comp_sys: list[str] = None) -> pd.DataFrame:
         all_steps: list[dict] = []
-
-        # Sequentially search and stitch the paths exactly through all given waypoints
         for i in range(len(waypoints) - 1):
             _, path = self.dijkstra(waypoints[i], waypoints[i + 1], penalty_m, comp_sys)
             if not path: return pd.DataFrame()
             all_steps.extend(path)
-
         if not all_steps: return pd.DataFrame()
 
         def _stop_type(oid: str) -> str:
@@ -337,10 +317,10 @@ class DYPODParser:
             cum_m += seg.get("length_m",0.0)
 
         last_fwd = all_steps[-1]["forward"]; last_seg = self.seg_props.get(all_steps[-1]["ne_id"],{})
-        info_end = self.op_info.get(end_op,{})
+        info_end = self.op_info.get(waypoints[-1],{})
         rows.append(dict(
-            cum_km        = cum_m/1000.0, op_id=end_op,
-            station_name  = info_end.get("name",end_op), stop_type="X",
+            cum_km        = cum_m/1000.0, op_id=waypoints[-1],
+            station_name  = info_end.get("name",waypoints[-1]), stop_type="X",
             lat=info_end.get("lat"), lon=info_end.get("lon"),
             speed_kmh     = last_seg.get("speed_normal" if last_fwd else "speed_reverse",30.0),
             gradient_perm = last_seg.get("grad_normal"  if last_fwd else "grad_reverse", 0.0),
@@ -520,7 +500,7 @@ class TrainSimulator:
             rear_km = max(0.0, km - self.length_m / 1000.0)
             seg     = track.seg_at(km)
 
-            # --- BUG FIX: Prune passed stops to prevent desync/infinite stalls ---
+            # --- Prune passed stops to prevent desync/infinite stalls ---
             while stops_km and km > stops_km[0] + 0.1:
                 stops_km.pop(0)
 
@@ -644,10 +624,8 @@ def kpi_card(val: str, lbl: str, delta: str = "", color: str = C["primary"]) -> 
             f'<div style="font-size:.72rem;color:#64748B;margin-top:2px">{lbl}</div>{d}</div>')
 
 def load_xml_from_upload(uploaded) -> str | None:
-    # Use a deterministic temporary directory based on the app to prevent state wiping
     tmp_dir = os.path.join(tempfile.gettempdir(), "dypod_fixed_cache")
     os.makedirs(tmp_dir, exist_ok=True)
-
     ext = uploaded.name.lower().rsplit(".",1)[-1]
     if ext == "zip":
         zp = os.path.join(tmp_dir, uploaded.name)
@@ -656,8 +634,7 @@ def load_xml_from_upload(uploaded) -> str | None:
             xmls = [n for n in zf.namelist() if n.lower().endswith((".xml",".railml"))]
             if not xmls: return None
             extracted_path = os.path.join(tmp_dir, xmls[0])
-            if not os.path.exists(extracted_path):
-                zf.extract(xmls[0], tmp_dir)
+            if not os.path.exists(extracted_path): zf.extract(xmls[0], tmp_dir)
             return extracted_path
 
     path = os.path.join(tmp_dir, uploaded.name)
@@ -669,14 +646,6 @@ def load_xml_from_upload(uploaded) -> str | None:
 #  PROFILE CHART  (3-panel stepped: speed / gradient / electrification)
 # ─────────────────────────────────────────────────────────────────────────────
 def make_profile_chart(df: pd.DataFrame) -> go.Figure:
-    """
-    Three-panel chart with correctly stepped speed profile.
-    Speed uses line_shape='hv' so each segment's limit is displayed as a
-    horizontal plateau, with an instant vertical step at every km boundary.
-    Station labels are thinned automatically to avoid overlap.
-    Y-axis range is set to [0.75·min, 1.25·max] to make speed differences
-    clearly visible even on slow regional lines.
-    """
     stops_x = df[df["stop_type"] == "X"]
     stops_r = df[df["stop_type"] == "R"]
     total_km = float(df["cum_km"].max())
@@ -803,12 +772,8 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
 # ─────────────────────────────────────────────────────────────────────────────
 #  ROUTE MAP  (correct segment-by-segment colouring)
 # ─────────────────────────────────────────────────────────────────────────────
-def make_route_map(df: pd.DataFrame, via_ops: list,
+def make_route_map(df: pd.DataFrame, combined_vias: list,
                    parser: DYPODParser, show_halts: bool = True) -> go.Figure:
-    """
-    Route map with contiguous-run rendering so non-electrified sections
-    (and all other electrification changes) are correctly coloured.
-    """
     map_df = df.dropna(subset=["lat","lon"]).reset_index(drop=True)
     fig    = go.Figure()
 
@@ -856,7 +821,7 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
             hovertemplate="<b>%{text}</b><br>km %{customdata[0]:.2f}<br>"
                            "%{customdata[1]:.0f} km/h  grad %{customdata[2]:.1f} ‰<extra></extra>"))
 
-    for vid in (via_ops or []):
+    for vid in (combined_vias or []):
         info = parser.op_info.get(vid,{})
         if info.get("lat") and info.get("lon"):
             fig.add_trace(go.Scattermap(lat=[info["lat"]], lon=[info["lon"]],
@@ -894,13 +859,6 @@ def make_route_map(df: pd.DataFrame, via_ops: list,
 def make_kinematic_chart(hist: dict, stop_names: list[str],
                          df_profile: pd.DataFrame,
                          x_axis: str = "Distance (km)") -> go.Figure:
-    """
-    Two-panel kinematic plot:
-      Top   — actual speed vs speed limit (stepped)
-      Bottom — gross / recuperated / net energy
-    X-axis toggles between cumulative distance [km] and elapsed time [MM:SS].
-    Station positions are annotated with rotated labels.
-    """
     base = pd.to_datetime("1970-01-01")
     time_dt = [base + pd.to_timedelta(s, unit="s") for s in hist["time_s"]]
     dist_km  = hist["km"]
@@ -1006,10 +964,9 @@ st.markdown("""<style>
         padding:10px 14px;font-size:.85rem;color:#14532D;margin:8px 0}
 </style>""", unsafe_allow_html=True)
 
-if "rebuild_profile" not in st.session_state:
-    st.session_state.rebuild_profile = False
+if "rebuild_profile" not in st.session_state: st.session_state.rebuild_profile = False
 for _k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result",
-           "elec_analysis","op_start","op_end","comp_sys"):
+           "elec_analysis","op_start","op_end","comp_sys","combined_vias"):
     if _k not in st.session_state: st.session_state[_k] = None
 if not isinstance(st.session_state.via_ops, list): st.session_state.via_ops = []
 
@@ -1025,12 +982,11 @@ with st.sidebar:
                                  label_visibility="collapsed")
     xml_path = None
     if uploaded:
-        # Prevent constant state-wiping by checking file name and size
         file_id = f"{uploaded.name}_{uploaded.size}"
         if st.session_state.get("last_uploaded_id") != file_id:
             st.session_state.last_uploaded_id = file_id
             xp = load_xml_from_upload(uploaded)
-            for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys"):
+            for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys","combined_vias"):
                 st.session_state[k] = None if k != "via_ops" else []
             st.session_state.xml_path = xp
         xml_path = st.session_state.xml_path
@@ -1040,7 +996,7 @@ with st.sidebar:
         if local:
             sel = st.selectbox("Or pick local file", local, label_visibility="collapsed")
             if sel != st.session_state.xml_path:
-                for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys"):
+                for k in ("parser","xml_path","profile_df","via_ops","rep_result","mc_result","elec_analysis","comp_sys","combined_vias"):
                     st.session_state[k] = None if k != "via_ops" else []
                 st.session_state.xml_path = sel
                 st.session_state.last_uploaded_id = None
@@ -1059,9 +1015,7 @@ with st.sidebar:
     if xml_path:
         try:
             parser = _load(xml_path)
-            st.success(f"✅ {parser.parse_time} s · **{len(parser.op_info):,}** OPs · "
-                        f"**{len(parser.seg_props):,}** segments · "
-                        f"**{len(parser.station_list):,}** passenger stops")
+            st.success(f"✅ {parser.parse_time} s · **{len(parser.op_info):,}** OPs")
         except Exception as exc:
             st.error(f"Parse error: {exc}"); st.stop()
     else:
@@ -1101,18 +1055,53 @@ with st.sidebar:
     else:
         comp_sys = None
 
-    # 3. Route
-    st.markdown('<div class="sec">🗺️ Route</div>', unsafe_allow_html=True)
+    # 3. Route & Scenarios
+    st.markdown('<div class="sec">🗺️ Route & Scenario</div>', unsafe_allow_html=True)
+    scenario_mode = st.radio("Routing Mode", ["Single Journey", "Round-Trip / Shift", "Custom Itinerary"])
 
     station_dict = {nm: oid for nm, oid in parser.station_list}
     station_names = list(station_dict.keys())
 
-    if station_names:
-        op_start_name = st.selectbox("🔍 Departure station", station_names, index=0)
-        op_end_name   = st.selectbox("🔍 Arrival station", station_names, index=len(station_names)-1)
+    scenario_vias = []
 
-        op_start = station_dict.get(op_start_name)
-        op_end   = station_dict.get(op_end_name)
+    if station_names:
+        if scenario_mode == "Single Journey":
+            op_start_name = st.selectbox("🔍 Departure station", station_names, index=0)
+            op_end_name   = st.selectbox("🔍 Arrival station", station_names, index=len(station_names)-1)
+            op_start = station_dict.get(op_start_name)
+            op_end   = station_dict.get(op_end_name)
+
+        elif scenario_mode == "Round-Trip / Shift":
+            op_start_name = st.selectbox("🔍 Terminal A", station_names, index=0)
+            op_end_name   = st.selectbox("🔍 Terminal B", station_names, index=len(station_names)-1)
+            legs = st.number_input("Number of legs (1 direction = 1 leg)", min_value=2, max_value=20, value=2)
+            op_a = station_dict.get(op_start_name)
+            op_b = station_dict.get(op_end_name)
+            if op_a and op_b:
+                seq = [op_a if i % 2 == 0 else op_b for i in range(legs + 1)]
+                op_start = seq[0]
+                op_end = seq[-1]
+                scenario_vias = seq[1:-1]
+            else:
+                op_start, op_end = None, None
+
+        elif scenario_mode == "Custom Itinerary":
+            legs = st.number_input("Number of consecutive legs", min_value=2, max_value=15, value=2)
+            seq_names = []
+            for i in range(int(legs) + 1):
+                if i == 0:
+                    name = st.selectbox("Start Station", station_names, index=0, key=f"cust_{i}")
+                else:
+                    name = st.selectbox(f"End of Leg {i}", station_names, index=min(i, len(station_names)-1), key=f"cust_{i}")
+                seq_names.append(name)
+
+            seq = [station_dict.get(nm) for nm in seq_names]
+            if all(seq):
+                op_start = seq[0]
+                op_end = seq[-1]
+                scenario_vias = seq[1:-1]
+            else:
+                op_start, op_end = None, None
     else:
         op_start, op_end = None, None
         st.warning("No passenger stations found in the data.")
@@ -1126,8 +1115,9 @@ with st.sidebar:
         elec_reroute = False
         pen_km = 0
 
+    is_valid_route = bool(op_start and op_end and (op_start != op_end or scenario_vias))
     btn_profile = st.button("🗺️  Build Track Profile", use_container_width=True, type="primary",
-                             disabled=not(op_start and op_end and op_start != op_end))
+                             disabled=not is_valid_route)
 
 
     # 4. Simulation
@@ -1165,19 +1155,21 @@ with st.sidebar:
 
 
 # ── Actions ───────────────────────────────────────────────────────────────────
-if (btn_profile or st.session_state.rebuild_profile) and op_start and op_end:
+if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
     st.session_state.rebuild_profile = False
     pen = pen_km * 1000.0 if elec_reroute else 0.0
-    with st.spinner("Finding path and building profile…"):
-        ea  = parser.analyse_electrification(op_start, op_end, via_ops=st.session_state.via_ops or [], comp_sys=comp_sys)
+    combined_vias = st.session_state.via_ops + scenario_vias
+    with st.spinner("Finding path and building continuous profile…"):
+        ea  = parser.analyse_electrification(op_start, op_end, via_ops=combined_vias, comp_sys=comp_sys)
         df  = parser.build_profile(op_start, op_end,
-                                    via_ops=st.session_state.via_ops or [],
+                                    via_ops=combined_vias,
                                     penalty_m=pen, comp_sys=comp_sys)
-    if df is None or df.empty: st.error("No path found between the selected stations.")
+    if df is None or df.empty:
+        st.error("No path found between the selected sequence of stations.")
     else:
         st.session_state.update(profile_df=df, op_start=op_start, op_end=op_end,
                                  elec_analysis=ea, rep_result=None, mc_result=None,
-                                 comp_sys=comp_sys)
+                                 comp_sys=comp_sys, combined_vias=combined_vias)
 
 if btn_run and st.session_state.profile_df is not None:
     with st.spinner("Running kinematic physics simulation…"):
@@ -1245,9 +1237,9 @@ with tab_prof:
     cs  = st.session_state.comp_sys
 
     if df is None:
-        st.markdown("### 👈 Search for stations in the sidebar and click **Build Track Profile**")
+        st.markdown("### 👈 Configure your Route/Scenario in the sidebar and click **Build Track Profile**")
         st.info("Stitches meso-level railML segments into a direction-aware profile: "
-                "stepped speed limits, gradient, electrification, GPS coordinates.")
+                "stepped speed limits, gradient, electrification, GPS coordinates. Handles continuous multi-leg shifts.")
         st.stop()
 
     total_km = float(df["cum_km"].max())
@@ -1310,7 +1302,7 @@ with tab_prof:
     map_df = df.dropna(subset=["lat","lon"])
     if not map_df.empty:
         with st.expander("🗺️ Route map", expanded=True):
-            st.plotly_chart(make_route_map(df, st.session_state.via_ops or [], parser),
+            st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
                             use_container_width=True, key="route_map_tab1")
 
     # Speed summary table (pure Plotly — no matplotlib)
@@ -1368,8 +1360,11 @@ with tab_edit:
     df = st.session_state.profile_df
 
     # Via waypoints
-    st.markdown('<div class="sec">📍 Via Waypoints</div>', unsafe_allow_html=True)
-    st.caption("Force the route through specific intermediate stations. Rebuilds profile automatically.")
+    st.markdown('<div class="sec">📍 Manual Routing Waypoints</div>', unsafe_allow_html=True)
+    if scenario_mode != "Single Journey":
+        st.caption("ℹ️ **Note:** You are using a multi-leg scenario. Any manual routing waypoints added here will be applied to the **first leg** of the journey to force specific routing. Rebuilds profile automatically.")
+    else:
+        st.caption("Force the route through specific intermediate stations. Rebuilds profile automatically.")
 
     station_dict = {nm: oid for nm, oid in parser.station_list}
     station_names = list(station_dict.keys())
@@ -1385,7 +1380,7 @@ with tab_edit:
             st.rerun()
 
     if st.session_state.via_ops:
-        st.markdown("**Via waypoints (in order):**")
+        st.markdown("**Manual routing waypoints (in order):**")
         for i, vid in enumerate(st.session_state.via_ops):
             info = parser.op_info.get(vid,{})
             e1,e2,e3,e4 = st.columns([0.25,0.25,3,1])
@@ -1407,7 +1402,7 @@ with tab_edit:
             st.session_state.rebuild_profile = True
             st.rerun()
     else:
-        st.markdown('<div class="info-box">No via-waypoints. Router uses direct shortest path.</div>',
+        st.markdown('<div class="info-box">No manual waypoints. Router uses direct shortest path for each leg.</div>',
                     unsafe_allow_html=True)
 
     if df is not None:
@@ -1415,7 +1410,7 @@ with tab_edit:
         st.markdown('<div class="sec">🗺️ Route Map</div>', unsafe_allow_html=True)
         map_df2 = df.dropna(subset=["lat","lon"])
         if not map_df2.empty:
-            st.plotly_chart(make_route_map(df, st.session_state.via_ops or [], parser),
+            st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
                             use_container_width=True, key="route_map_tab2")
 
         # Override table
