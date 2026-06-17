@@ -972,8 +972,9 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
         stops_set.add(df_plot.iloc[0]["station_name"])
         stops_set.add(df_plot.iloc[-1]["station_name"])
 
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.10,
-                        row_heights=[0.45, 0.15, 0.40],
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                        vertical_spacing=[0.25, 0.08],
+                        row_heights=[0.40, 0.15, 0.45],
                         subplot_titles=("Simulated Train Speed [km/h]",
                                         "Track Gradient [‰]",
                                         "Cumulative Energy [kWh]"))
@@ -1036,22 +1037,26 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
                  y0=0, y1=e_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
         ]
 
-        # Place label explicitly under the bottom trace (y3)
-        annotations.append(dict(
-            x=x_pos, y=-0.18, xref="x", yref="y3 domain",
-            text=sname, showarrow=False, font=dict(size=10, color=color),
-            xanchor="right", yanchor="top", textangle=-45))
+        for yref in ("y domain", "y3 domain"):
+            annotations.append(dict(
+                x=x_pos, y=-0.18, xref="x", yref=yref,
+                text=sname, showarrow=False, font=dict(size=10, color=color),
+                xanchor="right", yanchor="top", textangle=-45))
+
+    xaxis_dict = dict(title=dict(text=x_title, standoff=90), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
+    xaxis2_dict = dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False)
 
     fig.update_layout(
-        height=950, margin=dict(l=60, r=40, t=70, b=160), hovermode="x unified",
+        height=1050, margin=dict(l=60, r=40, t=70, b=180), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes, annotations=annotations,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
+        xaxis=xaxis_dict,
+        xaxis2=xaxis2_dict,
+        xaxis3=xaxis_dict
     )
-    fig.update_xaxes(title_text=x_title, range=[x_min, x_max],
-                     tickformat=x_fmt, showgrid=True, gridcolor=C["light"])
     fig.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, showgrid=True, gridcolor=C["light"])
     fig.update_yaxes(title_text="Gradient [‰]",  row=2, col=1, showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     fig.update_yaxes(title_text="Energy [kWh]",  row=3, col=1, showgrid=True, gridcolor=C["light"])
@@ -1664,9 +1669,6 @@ with tab_run_t:
     if rep is None:
         st.info("👈 Build a profile, then click **▶️ Run** in the sidebar.")
         st.stop()
-
-    if st.session_state.get("scenario_mode") != "Single Journey":
-        st.info("ℹ️ **Scenario Mode Active:** The simulation below displays one sample leg (Leg 1) for visual clarity. The Monte Carlo tab evaluates the full scenario.")
 
     # Fallback to handle cached sessions that lack the newer multi-leg dictionary keys
     legs_data   = rep.get("leg_results", [])
