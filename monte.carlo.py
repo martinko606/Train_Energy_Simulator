@@ -227,43 +227,61 @@ class DYPODParser:
 
     def dijkstra(self, start: str, end: str,
                  penalty_m: float = 0.0, comp_sys: list[str] = None) -> tuple[float | None, list]:
-        if start not in self.graph: return None, []
+        if start not in self.graph:
+            return None, []
         tb  = itertools.count()
         pq  = [(0.0, next(tb), start, [])]
         vis: set = set()
         while pq:
             cost, _, node, path = heapq.heappop(pq)
-            if node in vis: continue
+            if node in vis:
+                continue
             vis.add(node)
-            if node == end: return cost, path
+            if node == end:
+                return cost, path
             for edge in self.graph.get(node, []):
                 nxt = edge["to"]
-                if nxt in vis: continue
+                if nxt in vis:
+                    continue
                 is_incomp = (comp_sys is not None) and (edge["electr"] not in comp_sys)
                 pen = penalty_m if is_incomp else 0.0
-                heapq.heappush(pq, (cost + edge["length_m"] + pen, next(tb), nxt,
-                                    path + [dict(from_op=node, **edge)]))
+                heapq.heappush(pq, (
+                    cost + edge["length_m"] + pen,
+                    next(tb), nxt,
+                    path + [dict(from_op=node, **edge)],
+                ))
         return None, []
 
-    def analyse_electrification(self, waypoints: list[str], comp_sys: list[str] = None) -> dict:
+    def analyse_electrification(self, start_op: str, end_op: str, via_ops: list[str] = None, comp_sys: list[str] = None) -> dict:
+        waypoints = [start_op] + (via_ops or []) + [end_op]
+
         p_normal = []
         for i in range(len(waypoints) - 1):
             _, path = self.dijkstra(waypoints[i], waypoints[i + 1], 0, comp_sys)
             if not path:
-                return dict(normal_km=0, incomp_km=0, gateway_km=0,
-                            penalised_km=0, penalised_incomp_km=0,
-                            detour_km=0, saving_km=0, has_alternative=False)
+                return dict(normal_km=0, normal_ue_km=0, gateway_km=0,
+                            gateway_op=None, penalised_km=0, penalised_ue_km=0,
+                            detour_km=0, elec_saving_km=0, has_alternative=False)
             p_normal.extend(path)
 
-        def _ue(path): return sum(self.seg_props.get(s["ne_id"],{}).get("length_m",0)
-                                   for s in path if (comp_sys is not None and s["electr"] not in comp_sys)) / 1000
-        def _tot(path): return sum(self.seg_props.get(s["ne_id"],{}).get("length_m",0)
-                                    for s in path) / 1000
-        normal_ue = _ue(p_normal); normal_tot = _tot(p_normal)
-        gw_km = 0.0
+        def _ue_km(path):
+            return sum(self.seg_props.get(s["ne_id"], {}).get("length_m", 0)
+                       for s in path if (comp_sys is not None and s["electr"] not in comp_sys)) / 1000
+
+        def _tot_km(path):
+            return sum(self.seg_props.get(s["ne_id"], {}).get("length_m", 0)
+                       for s in path) / 1000
+
+        normal_ue  = _ue_km(p_normal)
+        normal_tot = _tot_km(p_normal)
+
+        gateway_km = 0.0
+        gateway_op = None
         for s in p_normal:
-            if comp_sys is not None and s["electr"] not in comp_sys: break
-            gw_km += self.seg_props.get(s["ne_id"],{}).get("length_m",0)/1000
+            if comp_sys is not None and s["electr"] in comp_sys:
+                gateway_op = s["from_op"]
+                break
+            gateway_km += self.seg_props.get(s["ne_id"], {}).get("length_m", 0) / 1000
 
         p_pen = []
         for i in range(len(waypoints) - 1):
@@ -273,22 +291,32 @@ class DYPODParser:
                 break
             p_pen.extend(path)
 
-        pen_ue = _ue(p_pen); pen_tot = _tot(p_pen)
-        saving = normal_ue - pen_ue; detour = pen_tot - normal_tot
-        has_alt = saving >= 1.0 and detour <= max(saving * 10, 30)
-        return dict(normal_km=round(normal_tot,1), incomp_km=round(normal_ue,1),
-                    gateway_km=round(gw_km,1),
-                    penalised_km=round(pen_tot,1), penalised_incomp_km=round(pen_ue,1),
-                    detour_km=round(detour,1), saving_km=round(saving,1),
-                    has_alternative=has_alt)
+        pen_ue     = _ue_km(p_pen)
+        pen_tot    = _tot_km(p_pen)
+        elec_saving = normal_ue - pen_ue
+        detour      = pen_tot - normal_tot
+        has_alt     = elec_saving >= 1.0 and detour <= max(elec_saving * 10, 30)
 
-    def build_profile(self, waypoints: list[str], penalty_m: float = 0.0, comp_sys: list[str] = None) -> pd.DataFrame:
+        return dict(
+            normal_km=round(normal_tot, 1),    normal_ue_km=round(normal_ue, 1),
+            gateway_km=round(gateway_km, 1),   gateway_op=gateway_op,
+            penalised_km=round(pen_tot, 1),    penalised_ue_km=round(pen_ue, 1),
+            detour_km=round(detour, 1),        elec_saving_km=round(elec_saving, 1),
+            has_alternative=has_alt,
+        )
+
+    def build_profile(self, start_op: str, end_op: str,
+                      via_ops: list[str] | None = None,
+                      penalty_m: float = 0.0, comp_sys: list[str] = None) -> pd.DataFrame | None:
+        waypoints = [start_op] + (via_ops or []) + [end_op]
         all_steps: list[dict] = []
         for i in range(len(waypoints) - 1):
             _, path = self.dijkstra(waypoints[i], waypoints[i + 1], penalty_m, comp_sys)
-            if not path: return pd.DataFrame()
+            if not path:
+                return None
             all_steps.extend(path)
-        if not all_steps: return pd.DataFrame()
+        if not all_steps:
+            return None
 
         def _stop_type(oid: str) -> str:
             types = self.op_info.get(oid, {}).get("types", [])
@@ -296,40 +324,73 @@ class DYPODParser:
             if any(t in REQUEST_TYPES   for t in types): return "R"
             return ""
 
-        rows: list[dict] = []; cum_m = 0.0
+        def _sd(seg: dict, fwd: bool) -> dict:
+            return dict(
+                speed_kmh       = seg.get("speed_normal" if fwd else "speed_reverse", 30.0),
+                gradient_perm   = seg.get("grad_normal"  if fwd else "grad_reverse",  0.0),
+                electrification = seg.get("electrification", "NONE"),
+                recuperation    = seg.get("recuperation", 0),
+                length_m        = seg.get("length_m", 0.0),
+                braking_dist    = seg.get("braking_dist", 0),
+                n_tracks        = seg.get("n_tracks", "single"),
+            )
+
+        ue_gap_ahead: list[float] = []
+        for i, step in enumerate(all_steps):
+            elec = self.seg_props.get(step["ne_id"], {}).get("electrification", "NONE")
+            if comp_sys is not None and elec in comp_sys:
+                ue_gap_ahead.append(0.0)
+                continue
+            gap = 0.0
+            j = i
+            while j < len(all_steps):
+                s = self.seg_props.get(all_steps[j]["ne_id"], {})
+                e2 = s.get("electrification", "NONE")
+                if comp_sys is not None and e2 in comp_sys:
+                    break
+                gap += s.get("length_m", 0.0)
+                j += 1
+            ue_gap_ahead.append(gap)
+
+        rows: list[dict] = []
+        cum_m = 0.0
         for idx, step in enumerate(all_steps):
-            from_op = step["from_op"]; seg = self.seg_props.get(step["ne_id"],{})
-            fwd = step["forward"];  info = self.op_info.get(from_op,{})
+            from_op = step["from_op"]
+            seg     = self.seg_props.get(step["ne_id"], {})
+            sd      = _sd(seg, step["forward"])
+            info    = self.op_info.get(from_op, {})
             rows.append(dict(
                 cum_km        = cum_m / 1000.0,
                 op_id         = from_op,
                 station_name  = info.get("name", from_op),
                 stop_type     = _stop_type(from_op),
-                lat           = info.get("lat"), lon=info.get("lon"),
-                speed_kmh     = seg.get("speed_normal" if fwd else "speed_reverse", 30.0),
-                gradient_perm = seg.get("grad_normal"  if fwd else "grad_reverse",  0.0),
-                electrification=seg.get("electrification","NONE"),
-                recuperation  = seg.get("recuperation",0),
-                length_m      = seg.get("length_m",0.0),
-                n_tracks      = seg.get("n_tracks","single"),
-                braking_dist  = seg.get("braking_dist",0),
+                lat           = info.get("lat"),
+                lon           = info.get("lon"),
+                op_types      = ", ".join(info.get("types", [])),
+                ue_gap_m      = ue_gap_ahead[idx],
+                **sd,
             ))
-            cum_m += seg.get("length_m",0.0)
+            cum_m += seg.get("length_m", 0.0)
 
-        last_fwd = all_steps[-1]["forward"]; last_seg = self.seg_props.get(all_steps[-1]["ne_id"],{})
-        info_end = self.op_info.get(waypoints[-1],{})
+        last_fwd = all_steps[-1]["forward"]
+        last_seg = self.seg_props.get(all_steps[-1]["ne_id"], {})
+        last_sd  = _sd(last_seg, last_fwd)
+        info_end = self.op_info.get(end_op, {})
         rows.append(dict(
-            cum_km        = cum_m/1000.0, op_id=waypoints[-1],
-            station_name  = info_end.get("name",waypoints[-1]), stop_type="X",
-            lat=info_end.get("lat"), lon=info_end.get("lon"),
-            speed_kmh     = last_seg.get("speed_normal" if last_fwd else "speed_reverse",30.0),
-            gradient_perm = last_seg.get("grad_normal"  if last_fwd else "grad_reverse", 0.0),
-            electrification=last_seg.get("electrification","NONE"),
-            recuperation  =last_seg.get("recuperation",0), length_m=0.0,
-            n_tracks      =last_seg.get("n_tracks","single"),
-            braking_dist  =last_seg.get("braking_dist",0),
+            cum_km        = cum_m / 1000.0,
+            op_id         = end_op,
+            station_name  = info_end.get("name", end_op),
+            stop_type     = "X",
+            lat           = info_end.get("lat"),
+            lon           = info_end.get("lon"),
+            op_types      = ", ".join(info_end.get("types", [])),
+            ue_gap_m      = 0.0,
+            length_m      = 0.0,
+            **{k: v for k, v in last_sd.items() if k != "length_m"},
         ))
-        df = pd.DataFrame(rows); df["cum_km"] = df["cum_km"].round(4)
+
+        df = pd.DataFrame(rows)
+        df["cum_km"] = df["cum_km"].round(4)
         return df
 
     def search_stations(self, query: str, max_results: int = 80) -> list[tuple[str, str]]:
