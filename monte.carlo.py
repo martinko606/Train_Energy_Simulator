@@ -470,10 +470,18 @@ class TrackProfile:
 class TrainSimulator:
     def __init__(self, mass_kg, length_m, max_power_kw, aux_power_kw,
                  max_accel, max_decel, traction_type, efficiency,
-                 coast_threshold_m: float = 500.0):
+                 max_speed_kmh: float = 160.0,
+                 coast_threshold_m: float = 500.0,
+                 comp_sys: list[str] = None):
         self.mass_kg  = mass_kg
         self.eff_mass = mass_kg * 1.08
-        self.A, self.B, self.C = 1500.0, 30.0, 4.0
+
+        # Dynamic Davis coefficients
+        m_t = mass_kg / 1000.0
+        self.A = 20.0 * m_t
+        self.B = 0.2  * m_t
+        self.C = 2.5  + 0.03 * length_m
+
         self.traction   = traction_type
         self.trac_eff   = efficiency if traction_type == "ELECTRIC" else 0.85
         self.regen_eff  = 0.75 if traction_type == "ELECTRIC" else 0.0
@@ -482,7 +490,9 @@ class TrainSimulator:
         self.max_accel  = max_accel
         self.max_decel  = max_decel
         self.length_m   = length_m
+        self.max_v      = max_speed_kmh / 3.6
         self.coast_threshold_m = coast_threshold_m
+        self.comp_sys   = comp_sys
 
     def _res(self, v: float) -> float:
         return self.A + self.B * v + self.C * v * v
@@ -523,6 +533,7 @@ class TrainSimulator:
         # Watchdog limit to prevent infinite loops on impossible climbs
         max_iters = int(total_m / 0.1) + 36000
         iters = 0
+        dt = 1.0
 
         while dist < total_m:
             iters += 1
@@ -532,19 +543,23 @@ class TrainSimulator:
             km       = dist / 1000.0
             rear_km  = max(0.0, km - self.length_m / 1000.0)
             seg      = track.seg_at(km)
-            v_lim    = track.v_limit_span(km, rear_km)
+            v_lim    = min(track.v_limit_span(km, rear_km), self.max_v)
             slope    = seg.get("grad", 0.0)
             electr   = seg.get("electrification", "NONE")
             recup_ok = seg.get("recuperation", 0) == 1
 
+            # --- Prune passed stops to prevent desync/infinite stalls ---
+            while stops_km and km > stops_km[0] + 0.1:
+                stops_km.pop(0)
+
             coasting = False
-            if self.traction == "ELECTRIC" and electr == "NONE":
+            if self.traction == "ELECTRIC" and (self.comp_sys is not None and electr not in self.comp_sys):
                 gap_m = seg.get("ue_gap_m", 0.0)
                 if gap_m <= self.coast_threshold_m:
                     coasting = True
                 else:
                     raise RuntimeError(
-                        f"⚡ Electric vehicle on non-electrified track at km {km:.2f} "
+                        f"⚡ Electric vehicle on incompatible track ({electr}) at km {km:.2f} "
                         f"(gap {gap_m / 1000:.1f} km > coasting limit "
                         f"{self.coast_threshold_m / 1000:.1f} km)."
                     )
@@ -559,10 +574,11 @@ class TrainSimulator:
                 max_safe = min(max_safe, math.sqrt(max(0.0, 2.0 * eff_decel * d2s)))
 
             if hist is not None:
+                vl_front = min(track.v_limit_span(km, km), self.max_v)
                 hist["time_s"].append(t_s)
                 hist["km"].append(km)
                 hist["v_kmh"].append(v * 3.6)
-                hist["v_limit_kmh"].append(v_lim * 3.6)
+                hist["v_limit_kmh"].append(vl_front * 3.6)
                 hist["gross_kwh"].append(e_j / 3_600_000.0)
                 hist["regen_kwh"].append(r_j / 3_600_000.0)
                 hist["net_kwh"].append((e_j - r_j) / 3_600_000.0)
@@ -598,14 +614,14 @@ class TrainSimulator:
 
             e_j    += (mech_p / self.trac_eff + self.aux_w)
             r_j    += reg_p
-            dist   += v
-            t_s    += 1.0
+            dist   += v * dt
+            t_s    += dt
 
             if v < 0.5 and any(abs(km - s) <= 0.05 for s in stops_km):
                 v = 0.0
                 if hist is not None:
                     for pass_no in range(2):
-                        vl = track.v_limit_span(km, km) * 3.6
+                        vl = min(track.v_limit_span(km, km), self.max_v) * 3.6
                         hist["time_s"].append(t_s)
                         hist["km"].append(km)
                         hist["v_kmh"].append(0.0)
@@ -1100,12 +1116,14 @@ with st.sidebar:
         accel      = st.slider("Accel (m/s²)",  0.2, 1.5, 0.6, 0.05)
         decel      = st.slider("Brake (m/s²)",  0.4, 1.5, 0.9, 0.05)
         efficiency = st.slider("Efficiency (%)", 15, 95, 35) / 100.0
+        max_speed  = st.number_input("Max speed (km/h)", value=160, min_value=30, max_value=350)
         diesel_d   = st.number_input("Diesel (kWh/L)", value=10.0, step=0.1)
     else:
         p = PREDEFINED_VEHICLES[veh]
         traction, mass, length = p["traction"], p["mass"], p["length"]
         power, aux_power       = p["power"], p["aux_power"]
         accel, decel, efficiency = p["accel"], p["decel"], p["efficiency"]
+        max_speed              = p["max_speed"]
         diesel_d = 10.0
     unit_lbl = "L fuel" if traction == "DIESEL" else "kWh"
 
@@ -1187,6 +1205,7 @@ if btn_run and st.session_state.profile_df is not None:
             track_sample = TrackProfile(sample_df)
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
+                                   max_speed_kmh=max_speed,
                                    coast_threshold_m=coast_threshold_m,
                                    comp_sys=st.session_state.comp_sys)
 
@@ -1211,6 +1230,7 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
             track = TrackProfile(st.session_state.profile_df)
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
+                                   max_speed_kmh=max_speed,
                                    coast_threshold_m=coast_threshold_m,
                                    comp_sys=st.session_state.comp_sys)
             rows_mc = []
