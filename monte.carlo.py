@@ -1022,7 +1022,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         fill="tozeroy", fillcolor=C["bg_blue"]))
 
     fig_speed.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=140), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_speed, annotations=annotations_speed,
@@ -1068,13 +1068,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         line=dict(color=C["secondary"], width=2.5)))
 
     fig_energy.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=160), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_energy, annotations=annotations_energy,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
     )
 
@@ -1968,11 +1968,10 @@ with tab_mc_t:
                 hovertemplate="<b>%{x}</b><br>Savings: %{y:.2f} " + ul + "<extra></extra>",
             ))
             fig_bar.update_layout(
-                title=f"<b>Energy savings vs. all-stops</b> [{ul}]",
                 xaxis_title="Request-stop probability",
                 yaxis_title=f"Savings [{ul}]",
                 height=400, paper_bgcolor="white", plot_bgcolor="white",
-                margin=dict(t=60, b=50, l=60, r=20),
+                margin=dict(t=30, b=50, l=60, r=20),
                 font=dict(family="Inter, sans-serif", size=12),
                 yaxis=dict(gridcolor=C["light"]),
             )
@@ -2000,11 +1999,10 @@ with tab_mc_t:
                 line=dict(color=C["primary"], width=2.5), name="Mean",
             ))
             fig_err.update_layout(
-                title=f"<b>Energy distribution</b> [{ul}]",
                 xaxis_title="Request-stop probability",
                 yaxis_title=f"Energy [{ul}]",
                 height=400, paper_bgcolor="white", plot_bgcolor="white",
-                margin=dict(t=60, b=50, l=60, r=20),
+                margin=dict(t=30, b=50, l=60, r=20),
                 font=dict(family="Inter, sans-serif", size=12),
                 yaxis=dict(gridcolor=C["light"]),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
@@ -2025,11 +2023,10 @@ with tab_mc_t:
             line=dict(color=C["accent"], width=2.5), name="Mean time",
         ))
         fig_t.update_layout(
-            title="<b>Journey time vs. stopping policy</b>",
             xaxis_title="Request-stop probability",
             yaxis_title="Journey time [min]",
             height=360, paper_bgcolor="white", plot_bgcolor="white",
-            margin=dict(t=60, b=50, l=60, r=20),
+            margin=dict(t=30, b=50, l=60, r=20),
             font=dict(family="Inter, sans-serif", size=12),
             yaxis=dict(gridcolor=C["light"]),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
@@ -2053,11 +2050,10 @@ with tab_mc_t:
                 ),
             ))
             fig_et.update_layout(
-                title="<b>Energy–time trade-off</b> by stopping policy",
                 xaxis_title="Mean journey time [min]",
                 yaxis_title=f"Mean energy [{ul}]",
                 height=420, paper_bgcolor="white", plot_bgcolor="white",
-                margin=dict(t=60, b=50, l=60, r=20),
+                margin=dict(t=30, b=50, l=60, r=20),
                 font=dict(family="Inter, sans-serif", size=12),
             )
             st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}")
