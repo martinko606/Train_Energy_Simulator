@@ -982,7 +982,7 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
 
     # Omitting subplot_titles creates a massive, clean gap for the angled text!
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.18,
+                        vertical_spacing=0.25,
                         row_heights=[0.40, 0.20, 0.40])
 
     # Speed traces
@@ -1044,14 +1044,14 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
         ]
 
         # Dual axis plotting: Places the text dynamically into the empty horizontal gaps
-        for yref, y_offset in [("y domain", -0.15), ("y3 domain", -0.15)]:
+        for yref, y_offset in [("y domain", -0.20), ("y3 domain", -0.20)]:
             annotations.append(dict(
                 x=x_pos, y=y_offset, xref="x", yref=yref,
                 text=sname, showarrow=False, font=dict(size=10, color=color),
                 xanchor="right", yanchor="top", textangle=-45))
 
-    xaxis_dict = dict(title=dict(text=x_title, standoff=120), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
-    xaxis2_dict = dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False)
+    xaxis_bottom_dict = dict(title=dict(text=x_title, standoff=120), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
+    xaxis_top_dict = dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False)
 
     fig.update_layout(
         height=1000, margin=dict(l=100, r=40, t=40, b=180), hovermode="x unified",
@@ -1060,9 +1060,9 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
         shapes=shapes, annotations=annotations,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=xaxis_dict,
-        xaxis2=xaxis2_dict,
-        xaxis3=xaxis_dict
+        xaxis=xaxis_top_dict,
+        xaxis2=xaxis_top_dict,
+        xaxis3=xaxis_bottom_dict
     )
     fig.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, showgrid=True, gridcolor=C["light"])
     fig.update_yaxes(title_text="Gradient [‰]",  row=2, col=1, showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
