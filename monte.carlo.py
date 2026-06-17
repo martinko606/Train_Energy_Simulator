@@ -1558,7 +1558,13 @@ with tab_prof:
 
     # Electrification alerts
     if ea is not None and traction == "ELECTRIC":
-        ue = ea["incomp_km"]; gw = ea["gateway_km"]
+        # Fallback to old keys just in case, but prefer new keys
+        ue = ea.get("normal_ue_km", ea.get("incomp_km", 0.0))
+        gw = ea.get("gateway_km", 0.0)
+        saving_km = ea.get("elec_saving_km", ea.get("saving_km", 0.0))
+        pen_ue = ea.get("penalised_ue_km", ea.get("penalised_incomp_km", 0.0))
+        detour_km = ea.get("detour_km", 0.0)
+
         coast_lbl = f"{coast_threshold_m/1000:.1f} km"
         if ue == 0:
             st.markdown('<div class="ok-box">✅ <b>Fully compatible electrified route.</b></div>', unsafe_allow_html=True)
@@ -1567,9 +1573,9 @@ with tab_prof:
         elif abs(gw - ue) < 0.1 and gw > 0:
             st.markdown(f'<div class="warn-box">⚠️ Unavoidable run-in: <b>{gw:.1f} km</b> incompatible track. No compatible exit from <b>{sn}</b>. Raise coasting limit or use diesel.</div>', unsafe_allow_html=True)
         elif ea.get("has_alternative") and not elec_reroute:
-            st.markdown(f'<div class="warn-box">⚡ <b>{ue:.1f} km incompatible track.</b> Enable <b>Prefer compatible track</b> to save <b>{ea["saving_km"]:.1f} km</b> (+{ea["detour_km"]:.0f} km detour). Or raise coasting limit ({coast_lbl}).</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="warn-box">⚡ <b>{ue:.1f} km incompatible track.</b> Enable <b>Prefer compatible track</b> to save <b>{saving_km:.1f} km</b> (+{detour_km:.0f} km detour). Or raise coasting limit ({coast_lbl}).</div>', unsafe_allow_html=True)
         elif elec_reroute and ea.get("has_alternative"):
-            st.markdown(f'<div class="ok-box">✅ <b>Compatible routing active.</b> Saved <b>{ea["saving_km"]:.1f} km</b> incompatible track (+{ea["detour_km"]:.0f} km detour). Remaining: <b>{ea["penalised_incomp_km"]:.1f} km</b> unavoidable (coast limit: {coast_lbl}).</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="ok-box">✅ <b>Compatible routing active.</b> Saved <b>{saving_km:.1f} km</b> incompatible track (+{detour_km:.0f} km detour). Remaining: <b>{pen_ue:.1f} km</b> unavoidable (coast limit: {coast_lbl}).</div>', unsafe_allow_html=True)
         elif ue > 0:
             st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km incompatible track</b> exceeds coasting limit ({coast_lbl}). Raise limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
 
