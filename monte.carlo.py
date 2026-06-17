@@ -1202,6 +1202,7 @@ if btn_run and st.session_state.profile_df is not None:
             st.error(str(e))
 
 if btn_mc and st.session_state.profile_df is not None and mc_probs:
+    pb = None
     with st.spinner(f"Monte Carlo — {int(mc_n)} × {len(mc_probs)} probabilities…"):
         try:
             track = TrackProfile(st.session_state.profile_df)
@@ -1211,7 +1212,7 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
                                    comp_sys=st.session_state.comp_sys)
             rows_mc = []
 
-            prog_bar = st.progress(0.0, text="Initializing Monte Carlo Engine...")
+            pb = st.progress(0.0, text="Initializing Monte Carlo Engine...")
             total_runs = len(mc_probs) * int(mc_n)
             completed_runs = 0
 
@@ -1224,7 +1225,7 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
                     t_list.append(st_["journey_time_s"])
                     completed_runs += 1
                     if completed_runs % max(1, total_runs // 20) == 0:
-                        prog_bar.progress(completed_runs / total_runs, text=f"Computing permutations ({completed_runs}/{total_runs})")
+                        if pb is not None: pb.progress(completed_runs / total_runs, text=f"Computing permutations ({completed_runs}/{total_runs})")
 
                 rows_mc.append(dict(
                     prob=f"{int(p_val * 100)}%", p_num=p_val,
@@ -1232,16 +1233,15 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
                     min_e=np.min(e_list),    max_e=np.max(e_list),
                     mean_t=np.mean(t_list),  min_t=np.min(t_list), max_t=np.max(t_list),
                 ))
-            prog_bar.empty()
+            if pb is not None: pb.empty()
 
             mc_df = pd.DataFrame(rows_mc)
             mc_df["savings"] = (mc_df["mean_e"].max() - mc_df["mean_e"]).clip(lower=0)
             mc_df["unit"]    = unit_lbl
             st.session_state.mc_result = mc_df
         except RuntimeError as e:
-            if 'pb' in dir(): pb.empty()
+            if pb is not None: pb.empty()
             st.error(str(e))
-
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 tab_prof, tab_edit, tab_run_t, tab_mc_t = st.tabs([
