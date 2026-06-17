@@ -967,18 +967,23 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
     all_stops_df = pd.DataFrame()
     if df_profile is not None and not df_profile.empty:
         df_plot = df_profile.copy()
-        df_plot.loc[df_plot.index[0], "stop_type"] = "X"
-        df_plot.loc[df_plot.index[-1], "stop_type"] = "X"
-        all_stops_df = df_plot[df_plot["stop_type"].isin(["X","R"])]
-        stops_set.add(df_plot.iloc[0]["station_name"])
-        stops_set.add(df_plot.iloc[-1]["station_name"])
 
+        # Robustly find the first and last actual stations in this specific leg
+        valid_stations = df_plot[df_plot["station_name"].str.strip() != ""]
+        if not valid_stations.empty:
+            first_idx = valid_stations.index[0]
+            last_idx = valid_stations.index[-1]
+            df_plot.loc[first_idx, "stop_type"] = "X"
+            df_plot.loc[last_idx, "stop_type"] = "X"
+            stops_set.add(df_plot.loc[first_idx, "station_name"])
+            stops_set.add(df_plot.loc[last_idx, "station_name"])
+
+        all_stops_df = df_plot[df_plot["stop_type"].isin(["X","R"])]
+
+    # Omitting subplot_titles creates a massive, clean gap for the angled text!
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.20,
-                        row_heights=[0.38, 0.17, 0.45],
-                        subplot_titles=("Simulated Train Speed [km/h]",
-                                        "Track Gradient [‰]",
-                                        "Cumulative Energy [kWh]"))
+                        vertical_spacing=0.18,
+                        row_heights=[0.40, 0.20, 0.40])
 
     # Speed traces
     fig.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
@@ -1038,18 +1043,19 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
                  y0=0, y1=e_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
         ]
 
-        for yref in ("y domain", "y3 domain"):
+        # Dual axis plotting: Places the text dynamically into the empty horizontal gaps
+        for yref, y_offset in [("y domain", -0.15), ("y3 domain", -0.15)]:
             annotations.append(dict(
-                x=x_pos, y=-0.25, xref="x", yref=yref,
+                x=x_pos, y=y_offset, xref="x", yref=yref,
                 text=sname, showarrow=False, font=dict(size=10, color=color),
                 xanchor="right", yanchor="top", textangle=-45))
 
-    xaxis_dict = dict(title=dict(text=x_title, standoff=110), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
+    xaxis_dict = dict(title=dict(text=x_title, standoff=120), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
     xaxis2_dict = dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False)
 
     fig.update_layout(
-        height=1150, margin=dict(l=60, r=40, t=70, b=180), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.03, x=0,
+        height=1000, margin=dict(l=100, r=40, t=40, b=180), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes, annotations=annotations,
         paper_bgcolor="white", plot_bgcolor="white",
