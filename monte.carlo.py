@@ -933,6 +933,92 @@ def make_route_map(df: pd.DataFrame, via_ops: list, parser: DYPODParser, show_ha
     return fig
 
 
+def make_kinematic_chart(hist: dict, stop_names: list[str],
+                         df_profile: pd.DataFrame,
+                         x_axis: str = "Distance (km)") -> go.Figure:
+    base = pd.to_datetime("1970-01-01")
+    time_dt = [base + pd.to_timedelta(s, unit="s") for s in hist["time_s"]]
+    dist_km  = hist["km"]
+
+    use_time = x_axis == "Time (MM:SS)"
+    x_data   = time_dt if use_time else dist_km
+    dur_s    = hist["time_s"][-1]
+    if use_time:
+        buf = pd.Timedelta(seconds=max(30, int(dur_s * 0.02)))
+        x_min = time_dt[0]  - buf; x_max = time_dt[-1] + buf
+        x_fmt = "%H:%M:%S" if dur_s >= 3600 else "%M:%S"
+        x_title = "Elapsed time (hh:mm:ss)" if dur_s >= 3600 else "Elapsed time (mm:ss)"
+    else:
+        buf_km = max(0.5, (dist_km[-1] - dist_km[0]) * 0.02)
+        x_min = dist_km[0] - buf_km; x_max = dist_km[-1] + buf_km
+        x_fmt = None; x_title = "Cumulative distance [km]"
+
+    stops_set = set(stop_names)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.18,
+                        subplot_titles=("Simulated Train Speed [km/h]",
+                                        "Cumulative Energy [kWh]"))
+
+    # Speed traces
+    fig.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
+        line=dict(color=C["red"], dash="dash", width=1.8, shape="hv")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_data, y=hist["v_kmh"], name="Actual Speed",
+        line=dict(color=C["primary"], width=2.5),
+        fill="tozeroy", fillcolor=C["bg_blue"]), row=1, col=1)
+
+    # Energy traces
+    fig.add_trace(go.Scatter(x=x_data, y=hist["gross_kwh"], name="Gross Energy",
+        line=dict(color=C["yellow"], width=2),
+        fill="tozeroy", fillcolor="rgba(202,138,4,0.10)"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_data, y=hist["regen_kwh"], name="Recuperated",
+        line=dict(color=C["green"], width=2, dash="dash"),
+        fill="tozeroy", fillcolor="rgba(22,163,74,0.10)"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
+        line=dict(color=C["secondary"], width=2.5)), row=2, col=1)
+
+    # Station annotations
+    v_max = max(max(hist["v_limit_kmh"]), max(hist["v_kmh"])) * 1.05 if hist["v_kmh"] else 10
+    e_max = max(hist["gross_kwh"]) * 1.05 if hist["gross_kwh"] else 1
+
+    km_arr = np.array(hist["km"])
+    all_stops_df = df_profile[df_profile["stop_type"].isin(["X","R"])] if df_profile is not None else pd.DataFrame()
+
+    shapes: list[dict] = []; annotations: list[dict] = []
+    for _, srow in all_stops_df.iterrows():
+        skm   = float(srow["cum_km"])
+        stype = srow["stop_type"]
+        sname = srow["station_name"]
+        if not (km_arr.min()-0.1 <= skm <= km_arr.max()+0.1): continue
+        color = C["grey"] if stype == "X" else (C["primary"] if sname in stops_set else C["red"])
+        idx   = int(np.argmin(np.abs(km_arr - skm)))
+        x_pos = time_dt[idx] if use_time else float(dist_km[idx])
+
+        shapes += [
+            dict(type="line", xref="x", yref="y",  x0=x_pos, x1=x_pos,
+                 y0=0, y1=v_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
+            dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos,
+                 y0=0, y1=e_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
+        ]
+        for yref in ("y domain", "y2 domain"):
+            annotations.append(dict(
+                x=x_pos, y=-0.18, xref="x", yref=yref,
+                text=sname, showarrow=False, font=dict(size=10, color=color),
+                xanchor="right", yanchor="top", textangle=-45))
+
+    fig.update_layout(
+        height=820, margin=dict(l=60, r=40, t=70, b=140), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0,
+                    bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
+        shapes=shapes, annotations=annotations,
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="Inter, sans-serif", size=12),
+    )
+    fig.update_xaxes(title_text=x_title, range=[x_min, x_max],
+                     tickformat=x_fmt, showgrid=True, gridcolor=C["light"])
+    fig.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, showgrid=True, gridcolor=C["light"])
+    fig.update_yaxes(title_text="Energy [kWh]",  row=2, col=1, showgrid=True, gridcolor=C["light"])
+    return fig
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  STREAMLIT APP
 # ─────────────────────────────────────────────────────────────────────────────
@@ -963,7 +1049,7 @@ _SS_DEFAULTS = dict(
     rep_result=None, mc_result=None, elec_analysis=None,
     op_start=None, op_end=None, comp_sys=None, combined_vias=[],
     rebuild_profile=False, scenario_mode="Single Journey",
-    first_leg_dest=None, last_uploaded_id=None
+    last_uploaded_id=None, scenario_terminals=[]
 )
 for k, v in _SS_DEFAULTS.items():
     if k not in st.session_state:
@@ -1051,7 +1137,6 @@ with st.sidebar:
 
     scenario_mode = st.radio("Routing Mode", ["Single Journey", "Round-Trip / Shift", "Custom Itinerary"])
     st.session_state.scenario_mode = scenario_mode
-    st.session_state.first_leg_dest = None
 
     scenario_vias = []
     station_dict = {nm: oid for nm, oid in parser.station_list}
@@ -1063,7 +1148,6 @@ with st.sidebar:
             op_end_name   = st.selectbox("🔍 Arrival station", station_names, index=len(station_names)-1)
             op_start = station_dict.get(op_start_name)
             op_end   = station_dict.get(op_end_name)
-            st.session_state.first_leg_dest = op_end
 
         elif scenario_mode == "Round-Trip / Shift":
             op_start_name = st.selectbox("🔍 Terminal A", station_names, index=0)
@@ -1076,7 +1160,6 @@ with st.sidebar:
                 op_start = seq[0]
                 op_end = seq[-1]
                 scenario_vias = seq[1:-1]
-                st.session_state.first_leg_dest = seq[1] if len(seq) > 1 else None
             else:
                 op_start, op_end = None, None
 
@@ -1095,7 +1178,6 @@ with st.sidebar:
                 op_start = seq[0]
                 op_end = seq[-1]
                 scenario_vias = seq[1:-1]
-                st.session_state.first_leg_dest = seq[1] if len(seq) > 1 else None
             else:
                 op_start, op_end = None, None
     else:
@@ -1174,6 +1256,8 @@ if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
     st.session_state.rebuild_profile = False
     pen = pen_km * 1000.0 if elec_reroute else 0.0
     combined_vias = st.session_state.via_ops + scenario_vias
+    scenario_terminals = [op_start] + scenario_vias + [op_end]
+
     with st.spinner("Finding path and building continuous profile…"):
         ea  = parser.analyse_electrification(op_start, op_end, via_ops=combined_vias, comp_sys=comp_sys)
         df  = parser.build_profile(op_start, op_end,
@@ -1184,38 +1268,68 @@ if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
     else:
         st.session_state.update(profile_df=df, op_start=op_start, op_end=op_end,
                                 elec_analysis=ea, rep_result=None, mc_result=None,
-                                comp_sys=comp_sys, combined_vias=combined_vias)
+                                comp_sys=comp_sys, combined_vias=combined_vias,
+                                scenario_terminals=scenario_terminals)
 
 if btn_run and st.session_state.profile_df is not None:
     with st.spinner("Running kinematic physics simulation…"):
         try:
             df_full = st.session_state.profile_df
-            first_leg_dest = st.session_state.get("first_leg_dest")
-            scen_mode = st.session_state.get("scenario_mode", "Single Journey")
+            terminals = st.session_state.get("scenario_terminals", [])
 
-            if scen_mode != "Single Journey" and first_leg_dest:
-                idx_list = df_full.index[(df_full['op_id'] == first_leg_dest) & (df_full.index > 0)].tolist()
-                if idx_list:
-                    sample_df = df_full.iloc[:idx_list[0]+1].copy()
-                else:
-                    sample_df = df_full.copy()
-            else:
-                sample_df = df_full.copy()
+            terminal_kms = [0.0]
+            if len(terminals) > 1:
+                current_term_idx = 1
+                for idx, row in df_full.iterrows():
+                    if current_term_idx < len(terminals):
+                        if row["op_id"] == terminals[current_term_idx] and row["cum_km"] > terminal_kms[-1] + 0.1:
+                            terminal_kms.append(row["cum_km"])
+                            current_term_idx += 1
 
-            track_sample = TrackProfile(sample_df)
+            if len(terminal_kms) != len(terminals):
+                terminal_kms = [0.0, df_full["cum_km"].max()]
+
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
                                    max_speed_kmh=max_speed,
                                    coast_threshold_m=coast_threshold_m,
                                    comp_sys=st.session_state.comp_sys)
 
-            hist, snames, stats = sim.run(track_sample, stop_mode=stop_mode, stop_prob=stop_prob,
-                                          dwell=dwell, record=True)
-            _, _, stats_worst = sim.run(track_sample, stop_mode="all", stop_prob=1.0,
-                                        dwell=dwell, record=False)
+            leg_results = []
+            total_gross, total_regen, total_net, total_net_worst, total_time = 0.0, 0.0, 0.0, 0.0, 0.0
+
+            for i in range(len(terminal_kms) - 1):
+                start_km = terminal_kms[i]
+                end_km = terminal_kms[i+1]
+
+                df_leg = df_full[(df_full["cum_km"] >= start_km - 1e-4) & (df_full["cum_km"] <= end_km + 1e-4)].copy()
+                df_leg["cum_km"] -= start_km
+
+                track_leg = TrackProfile(df_leg)
+                hist_leg, snames_leg, stats_leg = sim.run(track_leg, stop_mode=stop_mode, stop_prob=stop_prob, dwell=dwell, record=True)
+                _, _, stats_worst_leg = sim.run(track_leg, stop_mode="all", stop_prob=1.0, dwell=dwell, record=False)
+
+                leg_results.append({
+                    "leg_num": i + 1,
+                    "start_name": parser.op_name(terminals[i]) if len(terminals) > 1 else "",
+                    "end_name": parser.op_name(terminals[i+1]) if len(terminals) > 1 else "",
+                    "df_leg": df_leg,
+                    "hist": hist_leg,
+                    "stats": stats_leg,
+                    "stats_worst": stats_worst_leg,
+                    "snames": snames_leg
+                })
+
+                total_gross += stats_leg["gross_kwh"]
+                total_regen += stats_leg["regen_kwh"]
+                total_net += stats_leg["net_kwh"]
+                total_net_worst += stats_worst_leg["net_kwh"]
+                total_time += stats_leg["journey_time_s"]
 
             st.session_state.rep_result = dict(
-                hist=hist, stop_names=snames, stats=stats, stats_worst=stats_worst, sample_df=sample_df,
+                leg_results=leg_results,
+                total_stats={"gross_kwh": total_gross, "regen_kwh": total_regen, "net_kwh": total_net, "journey_time_s": total_time},
+                total_net_worst=total_net_worst,
                 traction=traction, diesel_d=diesel_d, efficiency=efficiency,
                 unit_lbl=unit_lbl, vehicle_name=veh, dwell=dwell,
                 coast_threshold_m=coast_threshold_m,
@@ -1512,139 +1626,67 @@ with tab_run_t:
         st.info("👈 Build a profile, then click **▶️ Run** in the sidebar.")
         st.stop()
 
-    if st.session_state.get("scenario_mode") != "Single Journey":
-        st.info("ℹ️ **Scenario Mode Active:** The simulation below displays one sample leg (Leg 1) for visual clarity. The Monte Carlo tab evaluates the full scenario.")
-
-    hist        = rep["hist"]
-    stats       = rep["stats"]
-    stats_worst = rep["stats_worst"]
-    snames      = rep["stop_names"]
+    legs_data   = rep.get("leg_results", [])
+    total_stats = rep.get("total_stats", {})
+    total_net_w = rep.get("total_net_worst", 0.0)
     _tr         = rep["traction"]
     _dd         = rep["diesel_d"]
     _eff        = rep["efficiency"]
+    unit_lbl    = rep["unit_lbl"]
 
-    consumed       = to_unit(stats, _tr, _dd, _eff)
-    consumed_worst = to_unit(stats_worst, _tr, _dd, _eff)
+    consumed       = to_unit(total_stats, _tr, _dd, _eff)
+    consumed_worst = to_unit({"net_kwh": total_net_w}, _tr, _dd, _eff)
     saved_amount   = consumed_worst - consumed
 
-    df_p   = rep.get("sample_df", st.session_state.profile_df)
-    tot_km = float(df_p["cum_km"].max()) if df_p is not None else 0
-    avg_spd = tot_km / (stats["journey_time_s"] / 3600) if stats["journey_time_s"] > 0 else 0
-    sn_r   = df_p["station_name"].iloc[0]  if df_p is not None else ""
-    en_r   = df_p["station_name"].iloc[-1] if df_p is not None else ""
+    st.markdown(f"### ▶️ Simulation Results  ·  {rep['vehicle_name']}")
 
-    st.markdown(f"### ▶️ {sn_r}  →  {en_r}  ·  {rep['vehicle_name']}")
-
-    kc2 = st.columns(6)
-    kc2[0].markdown(kpi_card(fmt_dur(stats["journey_time_s"]), "Journey time"),             unsafe_allow_html=True)
-    kc2[1].markdown(kpi_card(f"{consumed:.1f}",                f"Net consumed [{unit_lbl}]"), unsafe_allow_html=True)
+    st.markdown("#### Overall Scenario Statistics")
+    kc2 = st.columns(5)
+    kc2[0].markdown(kpi_card(fmt_dur(total_stats.get("journey_time_s", 0)), "Total Journey Time"), unsafe_allow_html=True)
+    kc2[1].markdown(kpi_card(f"{consumed:.1f}", f"Total Consumed [{unit_lbl}]"), unsafe_allow_html=True)
 
     save_color = C["green"] if saved_amount > 0.01 else C["grey"]
-    kc2[2].markdown(kpi_card(f"{saved_amount:.1f}",            f"Saved [{unit_lbl}]", delta="vs. All Stops", color=save_color), unsafe_allow_html=True)
+    kc2[2].markdown(kpi_card(f"{saved_amount:.1f}", f"Total Saved [{unit_lbl}]", delta="vs. All Stops", color=save_color), unsafe_allow_html=True)
 
-    kc2[3].markdown(kpi_card(f"{stats['regen_kwh']:.1f}",      "Recuperated [kWh]"),         unsafe_allow_html=True)
-    kc2[4].markdown(kpi_card(f"{avg_spd:.1f} km/h",            "Avg journey speed"),         unsafe_allow_html=True)
-    kc2[5].markdown(kpi_card(str(len(snames)),                 "Stops served"),              unsafe_allow_html=True)
-    st.write("")
+    kc2[3].markdown(kpi_card(f"{total_stats.get('regen_kwh', 0):.1f}", "Total Recuperated [kWh]"), unsafe_allow_html=True)
 
-    if snames:
-        st.markdown("**Stops served:** " + "  →  ".join(f"*{s}*" for s in snames))
-    else:
-        st.caption("No intermediate stops served on this run.")
+    total_stops = sum(len(l["snames"]) for l in legs_data)
+    kc2[4].markdown(kpi_card(str(total_stops), "Total Stops Served"), unsafe_allow_html=True)
+    st.write("---")
 
-    if hist:
-        fig3 = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            subplot_titles=("Simulated Train Speed [km/h]", "Cumulative Energy [kWh]"),
-            vertical_spacing=0.10, row_heights=[0.55, 0.45],
-        )
-        if tot_km > 30:
-            st.caption("🔍 **Tip:** On routes longer than 30km, the acceleration/braking curves might appear vertically squashed. Drag a box over the chart to zoom in and see the detailed train kinematics.")
+    for leg in legs_data:
+        st.markdown(f"### Leg {leg['leg_num']}: {leg['start_name']} ➔ {leg['end_name']}")
 
-        fig3.add_trace(go.Scatter(
-            x=hist["km"], y=hist["v_limit_kmh"], name="Track Limit",
-            line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")),
-            row=1, col=1)
-        fig3.add_trace(go.Scatter(
-            x=hist["km"], y=hist["v_kmh"], name="Train Speed",
-            line=dict(color=C["primary"], width=2.5),
-            fill="tozeroy", fillcolor=C["bg_blue"]), row=1, col=1)
-        fig3.add_trace(go.Scatter(
-            x=hist["km"], y=hist["gross_kwh"], name="Gross energy",
-            line=dict(color=C["yellow"], width=2)), row=2, col=1)
-        fig3.add_trace(go.Scatter(
-            x=hist["km"], y=hist["regen_kwh"], name="Recuperated",
-            line=dict(color=C["green"], width=2, dash="dash")), row=2, col=1)
-        fig3.add_trace(go.Scatter(
-            x=hist["km"], y=hist["net_kwh"], name="Net energy",
-            line=dict(color=C["secondary"], width=2.5)), row=2, col=1)
+        leg_snames = leg["snames"]
+        if leg_snames:
+            st.markdown("**Stops served:** " + "  →  ".join(f"*{s}*" for s in leg_snames))
+        else:
+            st.caption("No intermediate stops served on this leg.")
 
-        if df_p is not None:
-            for _, sr in df_p[df_p["stop_type"] == "X"].iterrows():
-                fig3.add_vline(x=sr["cum_km"], line_width=0.7,
-                               line_dash="dot", line_color="#CBD5E1", row=1, col=1)
+        leg_stats = leg["stats"]
+        leg_worst = leg["stats_worst"]
+        leg_cons  = to_unit(leg_stats, _tr, _dd, _eff)
+        leg_cons_w= to_unit(leg_worst, _tr, _dd, _eff)
+        leg_saved = leg_cons_w - leg_cons
+        leg_dist  = leg["df_leg"]["cum_km"].max() if not leg["df_leg"].empty else 0.0
+        leg_avg_spd = leg_dist / (leg_stats["journey_time_s"]/3600) if leg_stats["journey_time_s"] > 0 else 0
 
-        fig3.update_xaxes(title_text="Distance from departure [km]", row=2, col=1,
-                          gridcolor=C["light"])
-        fig3.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, gridcolor=C["light"])
-        fig3.update_yaxes(title_text="Energy [kWh]",  row=2, col=1, gridcolor=C["light"])
+        lk1, lk2, lk3, lk4, lk5 = st.columns(5)
+        lk1.metric("Time", fmt_dur(leg_stats["journey_time_s"]))
+        lk2.metric(f"Consumed [{unit_lbl}]", f"{leg_cons:.1f}")
+        lk3.metric(f"Saved [{unit_lbl}]", f"{leg_saved:.1f}")
+        lk4.metric("Avg Speed", f"{leg_avg_spd:.1f} km/h")
 
-        # Adjusted Height, Margin, and Legend position to fix subtitle overlap issues
-        fig3.update_layout(
-            height=620, paper_bgcolor="white", plot_bgcolor="white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0,
-                        bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
-            margin=dict(t=100, b=10, l=60, r=20),
-            font=dict(family="Inter, sans-serif", size=12),
-        )
-        st.plotly_chart(fig3, use_container_width=True)
+        if _tr == "DIESEL":
+            lk5.metric(f"Specific Fuel", f"{leg_cons/leg_dist*1000:.1f} mL/km" if leg_dist > 0 else "0.0")
+        else:
+            lk5.metric(f"Specific Energy", f"{leg_stats['net_kwh']/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
 
-        if stats["gross_kwh"] > 0 and tot_km > 0:
-            rp   = stats["regen_kwh"] / stats["gross_kwh"] * 100
-            spec = stats["net_kwh"] / tot_km
-            st.markdown("---")
-            ec1, ec2, ec3, ec4 = st.columns(4)
-            ec1.metric("Recuperation share",  f"{rp:.1f}%")
-            ec2.metric("Specific net energy", f"{spec:.3f} kWh/km")
-            if _tr == "DIESEL":
-                ec3.metric("Specific fuel", f"{consumed / tot_km * 1000:.1f} mL/km")
-                ec4.metric("CO₂ (est.)",    f"{consumed * 2.65:.0f} kg",
-                            help="Diesel combustion: ~2.65 kg CO₂/L")
-            else:
-                ec3.metric("Net kWh/km", f"{spec:.3f}")
-                ec4.metric("Regen saved", f"{stats['regen_kwh']:.1f} kWh")
+        if leg["hist"]:
+            fig_kin = make_kinematic_chart(leg["hist"], leg_snames, leg["df_leg"], x_axis=x_axis_choice)
+            st.plotly_chart(fig_kin, use_container_width=True, key=f"kin_chart_leg_{leg['leg_num']}")
 
-        with st.expander("📊 Detailed distributions"):
-            dd1, dd2 = st.columns(2)
-            with dd1:
-                fig_sv = go.Figure(go.Histogram(
-                    x=hist["v_kmh"], nbinsx=40,
-                    marker_color=C["primary"], opacity=0.8))
-                fig_sv.update_layout(
-                    title="Time distribution at speed",
-                    xaxis_title="Speed [km/h]", yaxis_title="Seconds",
-                    height=280, paper_bgcolor="white", plot_bgcolor="white",
-                    margin=dict(t=40, b=40, l=50, r=10))
-                st.plotly_chart(fig_sv, use_container_width=True)
-            with dd2:
-                wf_v = [stats["gross_kwh"], -stats["regen_kwh"], stats["net_kwh"]]
-                fig_wf = go.Figure(go.Waterfall(
-                    orientation="v",
-                    measure=["absolute", "relative", "total"],
-                    x=["Gross consumed", "Recuperated", "Net consumed"],
-                    y=wf_v,
-                    connector=dict(line=dict(color="#CBD5E1")),
-                    decreasing=dict(marker=dict(color=C["green"])),
-                    increasing=dict(marker=dict(color=C["red"])),
-                    totals=dict(marker=dict(color=C["primary"])),
-                    text=[f"{v:.1f} kWh" for v in wf_v],
-                    textposition="outside",
-                ))
-                fig_wf.update_layout(
-                    title="Energy waterfall [kWh]", height=280,
-                    paper_bgcolor="white", plot_bgcolor="white",
-                    margin=dict(t=40, b=40, l=50, r=10))
-                st.plotly_chart(fig_wf, use_container_width=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
