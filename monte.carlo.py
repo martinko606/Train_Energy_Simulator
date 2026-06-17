@@ -973,7 +973,7 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
         stops_set.add(df_plot.iloc[-1]["station_name"])
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        vertical_spacing=[0.25, 0.08],
+                        vertical_spacing=0.15,
                         row_heights=[0.40, 0.15, 0.45],
                         subplot_titles=("Simulated Train Speed [km/h]",
                                         "Track Gradient [‰]",
