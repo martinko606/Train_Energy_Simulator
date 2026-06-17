@@ -945,7 +945,7 @@ h3{color:#1E3A5F;font-size:1.2rem}
 _SS_DEFAULTS = dict(
     parser=None, xml_path=None, profile_df=None, via_ops=[],
     rep_result=None, mc_result=None, elec_analysis=None,
-    op_start=None, op_end=None,
+    op_start=None, op_end=None, comp_sys=None, combined_vias=[],
 )
 for k, v in _SS_DEFAULTS.items():
     if k not in st.session_state:
@@ -965,8 +965,10 @@ with st.sidebar:
     )
     xml_path = None
     if uploaded:
-        xp = load_xml_from_upload(uploaded)
-        if xp and xp != st.session_state.xml_path:
+        file_id = f"{uploaded.name}_{uploaded.size}"
+        if st.session_state.get("last_uploaded_id") != file_id:
+            st.session_state.last_uploaded_id = file_id
+            xp = load_xml_from_upload(uploaded)
             for k, v in _SS_DEFAULTS.items():
                 st.session_state[k] = v
             st.session_state.xml_path = xp
@@ -982,6 +984,7 @@ with st.sidebar:
                 for k, v in _SS_DEFAULTS.items():
                     st.session_state[k] = v
                 st.session_state.xml_path = sel
+                st.session_state.last_uploaded_id = None
             xml_path = sel
 
     @st.cache_resource(show_spinner="Parsing railML infrastructure…")
@@ -1080,6 +1083,8 @@ with st.sidebar:
         op_start, op_end = None, None
         st.warning("No passenger stations found in the data.")
 
+    is_valid_route = bool(op_start and op_end and (op_start != op_end or scenario_vias))
+
     st.markdown('<div class="sec">🚃 Vehicle</div>', unsafe_allow_html=True)
     veh = st.selectbox("Preset", ["Custom"] + list(PREDEFINED_VEHICLES.keys()), label_visibility="collapsed")
     if veh == "Custom":
@@ -1101,6 +1106,22 @@ with st.sidebar:
         diesel_d = 10.0
     unit_lbl = "L fuel" if traction == "DIESEL" else "kWh"
 
+    if traction == "ELECTRIC":
+        if veh == "Custom":
+            comp_sys = st.multiselect("Compatible catenary systems", ["3,000V/0Hz", "25,000V/50Hz", "1,500V/0Hz", "15,000V/16.7Hz"], default=["3,000V/0Hz", "25,000V/50Hz"])
+        else:
+            comp_sys = st.multiselect("Compatible catenary systems", ["3,000V/0Hz", "25,000V/50Hz", "1,500V/0Hz", "15,000V/16.7Hz"], default=p.get("systems", []))
+
+        st.markdown("**⚡ Compatible route preference**")
+        elec_reroute = st.toggle("Prefer compatible track", value=False, help="Penalises incompatible/non-electrified segments in route search.")
+        pen_km = st.slider("Detour tolerance (km per incompatible segment)", 10, 500, 100, 10) if elec_reroute else 0
+    else:
+        comp_sys = None
+        elec_reroute = False
+        pen_km = 0
+
+    btn_profile = st.button("🗺️  Build Track Profile", use_container_width=True, type="primary", disabled=not is_valid_route)
+
     st.markdown('<div class="sec">⚙️ Simulation</div>', unsafe_allow_html=True)
     dwell     = st.number_input("Station dwell (s)", value=30, step=5)
     stop_mode = st.radio("Stop mode", options=["all", "random", "none"],
@@ -1112,12 +1133,15 @@ with st.sidebar:
     coast_threshold_m = 500.0
     if traction == "ELECTRIC":
         st.markdown("**⚡ Electric coasting**")
-        coast_km = st.slider("Max coastable non-electrified gap (km)", 0.1, 10.0, 0.5, 0.1)
+        coast_km = st.slider("Max coastable incompatible gap (km)", 0.1, 10.0, 0.5, 0.1)
         coast_threshold_m = coast_km * 1000.0
 
     st.markdown('<div class="sec">🎲 Monte Carlo</div>', unsafe_allow_html=True)
     mc_n     = st.number_input("Runs per probability", 20, 500, 100, 10)
     mc_probs = st.multiselect("Probabilities to sweep", options=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0], default=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
+
+    st.markdown('<div class="sec">📊 Display Options</div>', unsafe_allow_html=True)
+    x_axis_choice = st.radio("Kinematic X-axis", ["Distance (km)", "Time (MM:SS)"])
 
     cb1, cb2 = st.columns(2)
     btn_run = cb1.button("▶️ Run",  use_container_width=True, disabled=st.session_state.profile_df is None)
@@ -1125,23 +1149,24 @@ with st.sidebar:
 
 
 # ─── Actions ─────────────────────────────────────────────────────────────────
-if btn_profile and op_start and op_end:
-    # No electrification penalty route calculation in basic build
-    pen = 0.0
+if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
+    st.session_state.rebuild_profile = False
+    pen = pen_km * 1000.0 if elec_reroute else 0.0
     combined_vias = st.session_state.via_ops + scenario_vias
-    with st.spinner("Finding path and building profile…"):
-        ea  = parser.analyse_electrification(op_start, op_end, via_ops=combined_vias)
+    with st.spinner("Finding path and building continuous profile…"):
+        ea  = parser.analyse_electrification(op_start, op_end, via_ops=combined_vias, comp_sys=comp_sys)
         df  = parser.build_profile(op_start, op_end,
                                    via_ops=combined_vias,
-                                   penalty_m=pen)
+                                   penalty_m=pen, comp_sys=comp_sys)
     if df is None or df.empty:
-        st.error("No path found between the selected stations. They may not be connected in this export.")
+        st.error("No path found between the selected sequence of stations.")
     else:
         st.session_state.update(profile_df=df, op_start=op_start, op_end=op_end,
-                                elec_analysis=ea, rep_result=None, mc_result=None)
+                                elec_analysis=ea, rep_result=None, mc_result=None,
+                                comp_sys=comp_sys, combined_vias=combined_vias)
 
 if btn_run and st.session_state.profile_df is not None:
-    with st.spinner("Running physics simulation…"):
+    with st.spinner("Running kinematic physics simulation…"):
         try:
             df_full = st.session_state.profile_df
             first_leg_dest = st.session_state.get("first_leg_dest")
@@ -1159,7 +1184,8 @@ if btn_run and st.session_state.profile_df is not None:
             track_sample = TrackProfile(sample_df)
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
-                                   coast_threshold_m=coast_threshold_m)
+                                   coast_threshold_m=coast_threshold_m,
+                                   comp_sys=st.session_state.comp_sys)
 
             hist, snames, stats = sim.run(track_sample, stop_mode=stop_mode, stop_prob=stop_prob,
                                           dwell=dwell, record=True)
@@ -1181,7 +1207,8 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
             track = TrackProfile(st.session_state.profile_df)
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
-                                   coast_threshold_m=coast_threshold_m)
+                                   coast_threshold_m=coast_threshold_m,
+                                   comp_sys=st.session_state.comp_sys)
             rows_mc = []
 
             prog_bar = st.progress(0.0, text="Initializing Monte Carlo Engine...")
@@ -1212,6 +1239,7 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
             mc_df["unit"]    = unit_lbl
             st.session_state.mc_result = mc_df
         except RuntimeError as e:
+            if 'pb' in dir(): pb.empty()
             st.error(str(e))
 
 
@@ -1227,160 +1255,125 @@ tab_prof, tab_edit, tab_run_t, tab_mc_t = st.tabs([
 with tab_prof:
     df  = st.session_state.profile_df
     ea  = st.session_state.elec_analysis
+    cs  = st.session_state.comp_sys
 
     if df is None:
-        st.markdown("### 👈 Search for stations in the sidebar and click **Build Track Profile**")
-        st.info("The tool stitches meso-level railML segments into a direction-aware track profile.")
+        st.markdown("### 👈 Configure your Route/Scenario in the sidebar and click **Build Track Profile**")
+        st.info("Stitches meso-level railML segments into a direction-aware profile: "
+                "stepped speed limits, gradient, electrification, GPS coordinates. Handles continuous multi-leg shifts.")
         st.stop()
 
     total_km = float(df["cum_km"].max())
     stops_x  = df[df["stop_type"] == "X"]
     stops_r  = df[df["stop_type"] == "R"]
-    ue_km    = df[df["electrification"] == "NONE"]["length_m"].sum() / 1000
-    elec_km  = total_km - ue_km
-    max_spd  = df["speed_kmh"].max()
-    max_grad = df["gradient_perm"].abs().max()
-    sn       = df["station_name"].iloc[0]
-    en       = df["station_name"].iloc[-1]
+
+    incomp_km = sum(s.get("length_m", 0) for s in df.to_dict('records') if cs is not None and s.get("electrification") not in cs) / 1000
+    comp_km   = total_km - incomp_km
+    sn = df["station_name"].iloc[0]
+    en = df["station_name"].iloc[-1]
 
     st.markdown(f"### 📍 {sn}  →  {en}")
-    st.caption("⚠️ **Note:** The chart below shows the maximum allowed track speed (statutory limits). To view the train's actual acceleration and braking curves, run a simulation and check the **▶️ Kinematic Simulation** tab.")
 
     # Electrification alerts
     if ea is not None and traction == "ELECTRIC":
-        ue        = ea["normal_ue_km"]
-        gw        = ea["gateway_km"]
-        coast_lbl = f"{coast_threshold_m / 1000:.1f} km"
+        ue = ea["incomp_km"]; gw = ea["gateway_km"]
+        coast_lbl = f"{coast_threshold_m/1000:.1f} km"
         if ue == 0:
-            st.markdown('<div class="ok-box">✅ <b>Fully electrified route</b> — electric vehicle can run without restriction.</div>', unsafe_allow_html=True)
-        elif ue <= coast_threshold_m / 1000:
-            st.markdown(f'<div class="ok-box">⚡ <b>Short non-electrified gap: {ue:.2f} km</b> — within coasting limit ({coast_lbl}). The vehicle coasts on inertia through this section (aux power only, no traction or regen).</div>', unsafe_allow_html=True)
-        elif gw > 0 and abs(gw - ue) < 0.1:
-            st.markdown(f'<div class="warn-box">⚠️ <b>Unavoidable non-electrified run-in: {gw:.1f} km</b> (coasting limit: {coast_lbl}). No electrified exit from <b>{sn}</b>. Raise the coasting limit or use a diesel vehicle.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="ok-box">✅ <b>Fully compatible electrified route.</b></div>', unsafe_allow_html=True)
+        elif ue <= coast_threshold_m/1000:
+            st.markdown(f'<div class="ok-box">⚡ Short incompatible gap: <b>{ue:.2f} km</b> — within coasting limit ({coast_lbl}). Vehicle will coast on inertia.</div>', unsafe_allow_html=True)
+        elif abs(gw - ue) < 0.1 and gw > 0:
+            st.markdown(f'<div class="warn-box">⚠️ Unavoidable run-in: <b>{gw:.1f} km</b> incompatible track. No compatible exit from <b>{sn}</b>. Raise coasting limit or use diesel.</div>', unsafe_allow_html=True)
         elif ea.get("has_alternative") and not elec_reroute:
-            st.markdown(f'<div class="warn-box">⚡ <b>{ue:.1f} km non-electrified</b> on this route ({gw:.1f} km unavoidable run-in). Enable <b>Prefer electrified route</b> to save <b>{ea["elec_saving_km"]:.1f} km</b> (+{ea["detour_km"]:.0f} km detour). Or raise coasting limit (now {coast_lbl}).</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="warn-box">⚡ <b>{ue:.1f} km incompatible track.</b> Enable <b>Prefer compatible track</b> to save <b>{ea["saving_km"]:.1f} km</b> (+{ea["detour_km"]:.0f} km detour). Or raise coasting limit ({coast_lbl}).</div>', unsafe_allow_html=True)
         elif elec_reroute and ea.get("has_alternative"):
-            st.markdown(f'<div class="ok-box">✅ <b>Electrified routing active.</b> Saved <b>{ea["elec_saving_km"]:.1f} km</b> non-electrified (+{ea["detour_km"]:.0f} km detour). Remaining: <b>{ea["penalised_ue_km"]:.1f} km</b> unavoidable (coast limit: {coast_lbl}).</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="ok-box">✅ <b>Compatible routing active.</b> Saved <b>{ea["saving_km"]:.1f} km</b> incompatible track (+{ea["detour_km"]:.0f} km detour). Remaining: <b>{ea["penalised_incomp_km"]:.1f} km</b> unavoidable (coast limit: {coast_lbl}).</div>', unsafe_allow_html=True)
         elif ue > 0:
-            st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km non-electrified</b> exceeds coasting limit ({coast_lbl}). Raise the limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km incompatible track</b> exceeds coasting limit ({coast_lbl}). Raise limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
 
     # KPI row
     kc = st.columns(6)
     kc[0].markdown(kpi_card(f"{total_km:.1f} km",       "Route length"),            unsafe_allow_html=True)
     kc[1].markdown(kpi_card(str(len(stops_x)),           "Mandatory stops (X)"),    unsafe_allow_html=True)
     kc[2].markdown(kpi_card(str(len(stops_r)),           "Request halts (R)"),      unsafe_allow_html=True)
-    kc[3].markdown(kpi_card(f"{max_spd:.0f} km/h",      "Max speed"),              unsafe_allow_html=True)
-    kc[4].markdown(kpi_card(f"{max_grad:.0f} ‰",        "Max gradient"),           unsafe_allow_html=True)
-    kc[5].markdown(kpi_card(
-        f"{elec_km:.0f} km", f"Electrified ({100 * elec_km / total_km:.0f}%)",
-        delta=(f"⚠️ {ue_km:.0f} km non-electrified" if ue_km > 0 else "✅ Fully electrified"),
-        color=(C["red"] if ue_km > 0 else C["green"]),
-    ), unsafe_allow_html=True)
+    kc[3].markdown(kpi_card(f"{df['speed_kmh'].max():.0f} km/h", "Max speed"),      unsafe_allow_html=True)
+    kc[4].markdown(kpi_card(f"{df['gradient_perm'].abs().max():.0f} ‰", "Max gradient"), unsafe_allow_html=True)
+
+    if traction == "ELECTRIC":
+        kc[5].markdown(kpi_card(f"{comp_km:.0f} km",f"Compatible ({100*comp_km/total_km if total_km>0 else 0:.0f}%)",
+                                 delta=(f"⚠️ {incomp_km:.0f} km incompatible" if incomp_km>0 else "✅ Fully compatible"),
+                                 color=(C["red"] if incomp_km>0 else C["green"])), unsafe_allow_html=True)
+    else:
+        kc[5].markdown(kpi_card(f"{total_km:.0f} km", "Diesel mode", color=C["green"]), unsafe_allow_html=True)
+
     st.write("")
 
-    st.plotly_chart(make_profile_chart(df), use_container_width=True)
+    st.plotly_chart(make_profile_chart(df), use_container_width=True, key="profile_chart_tab1")
 
+    # Electrification legend badges
     badges = ""
     for sys in df["electrification"].unique():
         col   = elec_color(sys)
-        km_e  = df[df["electrification"] == sys]["length_m"].sum() / 1000
-        icon  = "⚡" if sys != "NONE" else "🛢️"
+        km_e  = df[df["electrification"]==sys]["length_m"].sum()/1000
+        icon  = "⚡" if sys!="NONE" else "🛢️"
         badges += (f'<span style="background:{col};color:white;padding:3px 10px;'
                    f'border-radius:12px;font-size:.8rem;font-weight:600;margin:2px;'
                    f'display:inline-block">{icon} {sys} · {km_e:.1f} km</span> ')
     st.markdown(badges, unsafe_allow_html=True)
     st.write("")
 
-    map_df = df.dropna(subset=["lat", "lon"])
+    # Route map
+    map_df = df.dropna(subset=["lat","lon"])
     if not map_df.empty:
         with st.expander("🗺️ Route map", expanded=True):
-            st.plotly_chart(
-                make_route_map(df, st.session_state.via_ops or [], parser),
-                use_container_width=True,
-            )
+            st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
+                            use_container_width=True, key="route_map_tab1")
 
-    with st.expander("📐 Gradient statistics"):
-        g_vals = df["gradient_perm"]
-        gc1, gc2 = st.columns([2, 1])
-        with gc1:
-            fig_gh = go.Figure()
-            fig_gh.add_trace(go.Histogram(
-                x=g_vals[g_vals >= 0], name="Uphill",
-                marker_color=C["red"], opacity=0.75, nbinsx=25))
-            fig_gh.add_trace(go.Histogram(
-                x=g_vals[g_vals < 0], name="Downhill",
-                marker_color=C["primary"], opacity=0.75, nbinsx=25))
-            fig_gh.update_layout(
-                barmode="overlay", height=260,
-                xaxis_title="Gradient [‰]", yaxis_title="Segments",
-                paper_bgcolor="white", plot_bgcolor="white",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                margin=dict(t=30, b=40, l=50, r=10),
-            )
-            st.plotly_chart(fig_gh, use_container_width=True)
-        with gc2:
-            st.metric("Max uphill",   f"{g_vals.max():.1f} ‰")
-            st.metric("Max downhill", f"{g_vals.min():.1f} ‰")
-            st.metric("RMS gradient", f"{(g_vals**2).mean()**0.5:.1f} ‰")
-            st.metric("Mean",         f"{g_vals.mean():.1f} ‰")
-
-    with st.expander("⚡ Speed profile summary"):
-        spd_df = df[["cum_km", "station_name", "speed_kmh", "gradient_perm",
-                      "electrification", "n_tracks", "stop_type"]].copy()
+    # Speed summary table (pure Plotly — no matplotlib)
+    with st.expander("⚡ Speed & electrification summary"):
+        spd_df = df[["cum_km","station_name","stop_type","speed_kmh",
+                      "gradient_perm","electrification","n_tracks"]].copy()
         spd_df = spd_df[spd_df["station_name"].str.strip().ne("")].reset_index(drop=True)
-
-        stop_icons = spd_df["stop_type"].map({"X": "🚉", "R": "🛑"}).fillna("")
-        labels = stop_icons + " " + spd_df["station_name"].str.strip()
+        def _sclr(v):
+            lo,hi=30.0,200.0; t=max(0.0,min(1.0,(float(v)-lo)/(hi-lo)))
+            r=int(220*(1-t)+34*t); g=int(38*(1-t)+197*t); b=int(38*(1-t)+94*t)
+            return f"rgba({r},{g},{b},0.28)"
+        icons = spd_df["stop_type"].map({"X":"🚉","R":"🛑"}).fillna("")
+        labels = icons + " " + spd_df["station_name"].str.strip()
 
         fig_tbl = go.Figure(go.Table(
-            columnwidth=[60, 200, 80, 70, 160, 70],
-            header=dict(
-                values=["km", "Waypoint", "Speed [km/h]", "Grad [‰]",
-                        "Electrification", "Tracks"],
-                fill_color=C["dark"], font=dict(color="white", size=12),
-                align="left", height=28,
-            ),
-            cells=dict(
-                values=[
-                    spd_df["cum_km"].round(2),
-                    labels,
-                    spd_df["speed_kmh"].astype(int),
-                    spd_df["gradient_perm"].round(1),
-                    spd_df["electrification"],
-                    spd_df["n_tracks"],
-                ],
-                fill_color=[
-                    ["#F8FAFC"] * len(spd_df),
-                    ["#F8FAFC"] * len(spd_df),
-                    [_spd_cell_color(v) for v in spd_df["speed_kmh"]],
-                    ["#F8FAFC"] * len(spd_df),
-                    ["#F8FAFC"] * len(spd_df),
-                    ["#F8FAFC"] * len(spd_df),
-                ],
-                font=dict(size=11), align="left", height=24,
-            ),
-        ))
-        fig_tbl.update_layout(
-            height=min(60 + len(spd_df) * 26, 460),
-            margin=dict(l=0, r=0, t=0, b=0),
-        )
-        st.plotly_chart(fig_tbl, use_container_width=True)
+            columnwidth=[55,200,80,70,160,70],
+            header=dict(values=["km","Waypoint","Speed [km/h]","Grad [‰]","Electrif.","Tracks"],
+                        fill_color=C["dark"], font=dict(color="white",size=12),
+                        align="left", height=28),
+            cells=dict(values=[spd_df["cum_km"].round(2), labels,
+                                spd_df["speed_kmh"].astype(int),
+                                spd_df["gradient_perm"].round(1),
+                                spd_df["electrification"], spd_df["n_tracks"]],
+                        fill_color=[["#F8FAFC"]*len(spd_df), ["#F8FAFC"]*len(spd_df),
+                                    [_sclr(v) for v in spd_df["speed_kmh"]],
+                                    ["#F8FAFC"]*len(spd_df),
+                                    ["#F8FAFC"]*len(spd_df),  # Safe solid color
+                                    ["#F8FAFC"]*len(spd_df)],
+                        font=dict(size=11), align="left", height=24)))
+        fig_tbl.update_layout(height=min(60+len(spd_df)*26,440),
+                               margin=dict(l=0,r=0,t=0,b=0))
+        st.plotly_chart(fig_tbl, use_container_width=True, key="speed_table_tab1")
 
+    # Full data table
     with st.expander("📋 Full profile data table"):
-        cols = ["cum_km", "station_name", "stop_type", "speed_kmh",
-                "gradient_perm", "electrification", "recuperation",
-                "length_m", "ue_gap_m", "n_tracks", "op_types"]
-        cols = [c for c in cols if c in df.columns]
-        ren  = dict(cum_km="km [km]", station_name="Waypoint", stop_type="Stop",
-                    speed_kmh="Speed [km/h]", gradient_perm="Grad [‰]",
-                    electrification="Electrif.", recuperation="Recup.",
-                    length_m="Length [m]", ue_gap_m="UE gap [m]",
-                    n_tracks="Tracks", op_types="Type")
-        st.dataframe(df[cols].rename(columns=ren),
-                     use_container_width=True, hide_index=True, height=350)
+        cols=["cum_km","station_name","stop_type","speed_kmh","gradient_perm",
+              "electrification","recuperation","length_m","n_tracks"]
+        cols=[c for c in cols if c in df.columns]
+        ren=dict(cum_km="km [km]",station_name="Waypoint",stop_type="Stop",
+                 speed_kmh="Speed [km/h]",gradient_perm="Grad [‰]",
+                 electrification="Electrif.",recuperation="Recup.",
+                 length_m="Length [m]",n_tracks="Tracks")
+        st.dataframe(df[cols].rename(columns=ren), use_container_width=True,
+                     hide_index=True, height=340)
         st.download_button("⬇️ Download profile CSV",
                             df[cols].to_csv(index=False).encode(),
-                            "track_profile.csv", "text/csv")
+                            "track_profile.csv","text/csv")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1390,78 +1383,96 @@ with tab_edit:
     st.markdown("### ✏️ Interactive Profile Editor")
     df = st.session_state.profile_df
 
-    st.markdown('<div class="sec">📍 Via Waypoints</div>', unsafe_allow_html=True)
-    st.caption("Force the route through specific intermediate stations. "
-               "Rebuild the profile after adding or removing waypoints.")
+    # Via waypoints
+    st.markdown('<div class="sec">📍 Manual Routing Waypoints</div>', unsafe_allow_html=True)
+    if st.session_state.get("scenario_mode") != "Single Journey":
+        st.caption("ℹ️ **Note:** You are using a multi-leg scenario. Any manual routing waypoints added here will be applied to the **first leg** of the journey to force specific routing. Rebuilds profile automatically.")
+    else:
+        st.caption("Force the route through specific intermediate stations. Rebuilds profile automatically.")
 
-    qv     = st.text_input("Search waypoint to add", placeholder="e.g. Pardubice hl.n.", key="q_via")
-    res_v  = parser.search_stations(qv) if qv.strip() else []
-    cva, cvb = st.columns([3, 1])
-    via_sel  = None
-    if res_v:
-        via_opts = {nm: oid for oid, nm in res_v}
-        via_sel  = cva.selectbox("Select", list(via_opts.keys()),
-                                  label_visibility="collapsed", key="via_opt")
-    add_via = cvb.button("➕ Add", use_container_width=True, disabled=not res_v)
-    if add_via and via_sel and res_v:
-        via_op = via_opts.get(via_sel)
+    station_dict = {nm: oid for nm, oid in parser.station_list}
+    station_names = list(station_dict.keys())
+
+    cva, cvb = st.columns([3,1])
+    via_sel_name = cva.selectbox("Search waypoint to add", options=station_names, index=None, placeholder="Type to search e.g. Pardubice...", label_visibility="collapsed", key="via_opt")
+
+    if cvb.button("➕ Add", use_container_width=True, disabled=not via_sel_name):
+        via_op = station_dict.get(via_sel_name)
         if via_op and via_op not in st.session_state.via_ops:
             st.session_state.via_ops.append(via_op)
+            st.session_state.rebuild_profile = True
             st.rerun()
 
     if st.session_state.via_ops:
-        st.markdown("**Via waypoints (in order):**")
+        st.markdown("**Manual routing waypoints (in order):**")
         for i, vid in enumerate(st.session_state.via_ops):
-            info = parser.op_info.get(vid, {})
-            e1, e2, e3, e4 = st.columns([0.25, 0.25, 3, 1])
-            e1.markdown(f"**{i + 1}**")
-            if e2.button("↑", key=f"up_{i}", disabled=i == 0):
-                st.session_state.via_ops[i], st.session_state.via_ops[i - 1] = (
-                    st.session_state.via_ops[i - 1], st.session_state.via_ops[i])
+            info = parser.op_info.get(vid,{})
+            e1,e2,e3,e4 = st.columns([0.25,0.25,3,1])
+            e1.markdown(f"**{i+1}**")
+            if e2.button("↑", key=f"up_{i}", disabled=i==0):
+                st.session_state.via_ops[i], st.session_state.via_ops[i-1] = \
+                    st.session_state.via_ops[i-1], st.session_state.via_ops[i]
+                st.session_state.rebuild_profile = True
                 st.rerun()
-            e3.markdown(
-                f"📍 **{info.get('name', vid)}** "
-                f"<span style='color:{C['grey']};font-size:.8rem'>"
-                f"{', '.join(info.get('types', []))}</span>",
-                unsafe_allow_html=True,
-            )
+            e3.markdown(f"📍 **{info.get('name',vid)}** "
+                         f"<span style='color:{C['grey']};font-size:.8rem'>"
+                         f"{', '.join(info.get('types',[]))}</span>", unsafe_allow_html=True)
             if e4.button("✕ Remove", key=f"rm_{i}", use_container_width=True):
                 st.session_state.via_ops.pop(i)
+                st.session_state.rebuild_profile = True
                 st.rerun()
         if st.button("🗑️ Clear all"):
-            st.session_state.via_ops = []
+            st.session_state.via_ops=[]
+            st.session_state.rebuild_profile = True
             st.rerun()
-        st.markdown('<div class="info-box">ℹ️ Click <b>Build Track Profile</b> in the sidebar to apply waypoints.</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="info-box">No via-waypoints set. The router uses the direct shortest path.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-box">No manual waypoints. Router uses direct shortest path for each leg.</div>',
+                    unsafe_allow_html=True)
 
     if df is not None:
-        st.markdown('<div class="sec">📝 Speed & Stop Overrides</div>', unsafe_allow_html=True)
-        st.caption(
-            "Edit speed limits or stop types directly. "
-            "Changes are applied to the simulation profile only — "
-            "the underlying railML data is never modified."
-        )
-        edit_cols = ["station_name", "stop_type", "speed_kmh",
-                     "gradient_perm", "electrification", "length_m"]
+        # Map
+        st.markdown('<div class="sec">🗺️ Route Map</div>', unsafe_allow_html=True)
+        map_df2 = df.dropna(subset=["lat","lon"])
+        if not map_df2.empty:
+            st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
+                            use_container_width=True, key="route_map_tab2")
+
+        # Override table
+        st.markdown('<div class="sec">📝 Speed, Stop & Electrification Overrides</div>', unsafe_allow_html=True)
+        st.caption("Edit speed limits, stop types, or electrification directly. Changes apply to the simulation only.")
+        edit_cols = ["station_name","stop_type","speed_kmh","gradient_perm","electrification","length_m"]
         edit_cols = [c for c in edit_cols if c in df.columns]
-        edited = st.data_editor(
-            df[edit_cols].copy(),
-            column_config={
-                "station_name":    st.column_config.TextColumn("Waypoint",      disabled=True, width="large"),
-                "stop_type":       st.column_config.SelectboxColumn("Stop",    options=["X", "R", ""], width="small"),
-                "speed_kmh":       st.column_config.NumberColumn("Speed [km/h]", min_value=0, max_value=350, width="small"),
-                "gradient_perm":   st.column_config.NumberColumn("Grad [‰]",  disabled=True, width="small"),
-                "electrification": st.column_config.TextColumn("Electrif.",   disabled=True, width="medium"),
-                "length_m":        st.column_config.NumberColumn("Length [m]", disabled=True, width="small"),
-            },
-            use_container_width=True, hide_index=True,
-            num_rows="fixed", key="editor_tbl",
-        )
+        edited = st.data_editor(df[edit_cols].copy(), column_config={
+            "station_name":    st.column_config.TextColumn("Waypoint",      disabled=True, width="large"),
+            "stop_type":       st.column_config.SelectboxColumn("Stop",    options=["X","R",""],  width="small"),
+            "speed_kmh":       st.column_config.NumberColumn("Speed [km/h]", min_value=0, max_value=350, width="small"),
+            "gradient_perm":   st.column_config.NumberColumn("Grad [‰]",  disabled=True, width="small"),
+            "electrification": st.column_config.SelectboxColumn("Electrif.", options=list(ELEC_COLORS.keys()), disabled=False, width="medium"),
+            "length_m":        st.column_config.NumberColumn("Length [m]", disabled=True, width="small"),
+        }, use_container_width=True, hide_index=True, num_rows="fixed", key="editor_tbl")
+
         if st.button("✅ Apply overrides", type="primary"):
             updated = df.copy()
             updated["speed_kmh"] = edited["speed_kmh"].values
             updated["stop_type"] = edited["stop_type"].values
+            updated["electrification"] = edited["electrification"].values
+            updated["recuperation"] = updated["electrification"].apply(lambda x: 0 if x == "NONE" else 1)
+
+            # Recalculate the non-electrified gap ahead for the coasting physics engine
+            if "ue_gap_m" in updated.columns:
+                ue_gap_ahead = []
+                for i in range(len(updated)):
+                    if updated["electrification"].iloc[i] != "NONE":
+                        ue_gap_ahead.append(0.0)
+                        continue
+                    gap, j = 0.0, i
+                    while j < len(updated):
+                        if updated["electrification"].iloc[j] != "NONE": break
+                        gap += float(updated["length_m"].iloc[j])
+                        j += 1
+                    ue_gap_ahead.append(gap)
+                updated["ue_gap_m"] = ue_gap_ahead
+
             st.session_state.profile_df = updated
             st.session_state.rep_result = None
             st.success("✅ Profile updated. Run the simulation from the **▶️ Kinematic Simulation** tab.")
