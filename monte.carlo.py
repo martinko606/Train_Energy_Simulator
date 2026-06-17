@@ -1022,14 +1022,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         fill="tozeroy", fillcolor=C["bg_blue"]))
 
     fig_speed.update_layout(
-        title="Simulated Train Speed",
-        height=400, margin=dict(l=60, r=40, t=40, b=120), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_speed, annotations=annotations_speed,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False),
+        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Speed [km/h]", showgrid=True, gridcolor=C["light"])
     )
 
@@ -1049,12 +1048,11 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
             fill="tozeroy", fillcolor="rgba(37,99,235,0.55)", showlegend=False))
 
     fig_grad.update_layout(
-        title="Track Gradient",
-        height=300, margin=dict(l=60, r=40, t=40, b=50), hovermode="x unified",
+        height=250, margin=dict(l=60, r=40, t=20, b=60), hovermode="x unified",
         shapes=shapes_grad,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False),
+        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     )
 
@@ -1070,14 +1068,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         line=dict(color=C["secondary"], width=2.5)))
 
     fig_energy.update_layout(
-        title="Cumulative Energy",
-        height=400, margin=dict(l=60, r=40, t=40, b=120), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_energy, annotations=annotations_energy,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=20), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
     )
 
@@ -1418,14 +1415,38 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
     pb = None
     with st.spinner(f"Monte Carlo — {int(mc_n)} × {len(mc_probs)} probabilities…"):
         try:
-            track = TrackProfile(st.session_state.profile_df)
+            df_full = st.session_state.profile_df
+            terminals = st.session_state.get("scenario_terminals", [])
+
+            terminal_kms = [0.0]
+            if len(terminals) > 1:
+                current_term_idx = 1
+                for idx, row in df_full.iterrows():
+                    if current_term_idx < len(terminals):
+                        if row["op_id"] == terminals[current_term_idx] and row["cum_km"] > terminal_kms[-1] + 0.1:
+                            terminal_kms.append(row["cum_km"])
+                            current_term_idx += 1
+
+            if len(terminal_kms) != len(terminals):
+                terminal_kms = [0.0, df_full["cum_km"].max()]
+
+            leg_tracks = []
+            for i in range(len(terminal_kms) - 1):
+                start_km = terminal_kms[i]
+                end_km = terminal_kms[i+1]
+                df_leg = df_full[(df_full["cum_km"] >= start_km - 1e-4) & (df_full["cum_km"] <= end_km + 1e-4)].copy()
+                df_leg["cum_km"] -= start_km
+                leg_tracks.append(TrackProfile(df_leg))
+
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
                                    max_speed_kmh=max_speed,
                                    regen_efficiency=regen_efficiency,
                                    coast_threshold_m=coast_threshold_m,
                                    comp_sys=st.session_state.comp_sys)
-            rows_mc = []
+
+            rows_mc_overall = []
+            rows_mc_legs = {i: [] for i in range(len(leg_tracks))}
 
             pb = st.progress(0.0, text="Initializing Monte Carlo Engine...")
             total_runs = len(mc_probs) * int(mc_n)
@@ -1433,27 +1454,73 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
 
             for p_val in sorted(mc_probs, reverse=True):
                 sm = ("all" if p_val == 1.0 else "none" if p_val == 0.0 else "random")
-                e_list, t_list = [], []
+
+                overall_e_list, overall_t_list = [], []
+                leg_e_lists = {i: [] for i in range(len(leg_tracks))}
+                leg_t_lists = {i: [] for i in range(len(leg_tracks))}
+
                 for _ in range(int(mc_n)):
-                    _, _, st_ = sim.run(track, sm, p_val, dwell)
-                    e_list.append(to_unit(st_, traction, diesel_d, efficiency))
-                    t_list.append(st_["journey_time_s"])
+                    run_e = 0.0
+                    run_t = 0.0
+                    for i, track_leg in enumerate(leg_tracks):
+                        _, _, st_ = sim.run(track_leg, sm, p_val, dwell)
+                        e_val = to_unit(st_, traction, diesel_d, efficiency)
+                        t_val = st_["journey_time_s"]
+
+                        leg_e_lists[i].append(e_val)
+                        leg_t_lists[i].append(t_val)
+                        run_e += e_val
+                        run_t += t_val
+
+                    overall_e_list.append(run_e)
+                    overall_t_list.append(run_t)
+
                     completed_runs += 1
                     if completed_runs % max(1, total_runs // 20) == 0:
                         if pb is not None: pb.progress(completed_runs / total_runs, text=f"Computing permutations ({completed_runs}/{total_runs})")
 
-                rows_mc.append(dict(
+                rows_mc_overall.append(dict(
                     prob=f"{int(p_val * 100)}%", p_num=p_val,
-                    mean_e=np.mean(e_list),  std_e=np.std(e_list),
-                    min_e=np.min(e_list),    max_e=np.max(e_list),
-                    mean_t=np.mean(t_list),  min_t=np.min(t_list), max_t=np.max(t_list),
+                    mean_e=np.mean(overall_e_list),  std_e=np.std(overall_e_list),
+                    min_e=np.min(overall_e_list),    max_e=np.max(overall_e_list),
+                    mean_t=np.mean(overall_t_list),  min_t=np.min(overall_t_list), max_t=np.max(overall_t_list),
                 ))
+
+                for i in range(len(leg_tracks)):
+                    rows_mc_legs[i].append(dict(
+                        prob=f"{int(p_val * 100)}%", p_num=p_val,
+                        mean_e=np.mean(leg_e_lists[i]),  std_e=np.std(leg_e_lists[i]),
+                        min_e=np.min(leg_e_lists[i]),    max_e=np.max(leg_e_lists[i]),
+                        mean_t=np.mean(leg_t_lists[i]),  min_t=np.min(leg_t_lists[i]), max_t=np.max(leg_t_lists[i]),
+                    ))
+
             if pb is not None: pb.empty()
 
-            mc_df = pd.DataFrame(rows_mc)
-            mc_df["savings"] = (mc_df["mean_e"].max() - mc_df["mean_e"]).clip(lower=0)
-            mc_df["unit"]    = unit_lbl
-            st.session_state.mc_result = mc_df
+            mc_df_overall = pd.DataFrame(rows_mc_overall)
+            mc_df_overall["savings"] = (mc_df_overall["mean_e"].max() - mc_df_overall["mean_e"]).clip(lower=0)
+            mc_df_overall["unit"] = unit_lbl
+
+            legs_results = []
+            for i in range(len(leg_tracks)):
+                df_l = pd.DataFrame(rows_mc_legs[i])
+                df_l["savings"] = (df_l["mean_e"].max() - df_l["mean_e"]).clip(lower=0)
+                df_l["unit"] = unit_lbl
+
+                s_name = leg_tracks[i].df["station_name"].iloc[0] if not leg_tracks[i].df.empty else ""
+                e_name = leg_tracks[i].df["station_name"].iloc[-1] if not leg_tracks[i].df.empty else ""
+
+                legs_results.append({
+                    "leg_num": i + 1,
+                    "start_name": s_name,
+                    "end_name": e_name,
+                    "df": df_l
+                })
+
+            st.session_state.mc_result = {
+                "overall": mc_df_overall,
+                "legs": legs_results
+            }
+
         except RuntimeError as e:
             if pb is not None: pb.empty()
             st.error(str(e))
@@ -1756,7 +1823,8 @@ with tab_run_t:
             "hist": rep.get("hist"),
             "stats": rep.get("stats", {}),
             "stats_worst": rep.get("stats_worst", rep.get("stats", {})),
-            "snames": rep.get("stop_names", [])
+            "snames": rep.get("stop_names", []),
+            "total_possible_stops": len(rep.get("stop_names", []))
         }]
 
     for leg in legs_data:
@@ -1802,10 +1870,10 @@ with tab_run_t:
 #  TAB 4 – MONTE CARLO
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_mc_t:
-    mc_df = st.session_state.mc_result
+    mc_data = st.session_state.mc_result
     df_p  = st.session_state.profile_df
 
-    if mc_df is None:
+    if mc_data is None:
         st.info("👈 Build a profile, then click **🎲 MC** in the sidebar.")
         if df_p is not None:
             tr = TrackProfile(df_p)
@@ -1820,11 +1888,23 @@ with tab_mc_t:
                 )
         st.stop()
 
-    ul     = mc_df["unit"].iloc[0]
+    # Determine fallback state format for old cached sessions
+    if isinstance(mc_data, pd.DataFrame):
+        mc_overall = mc_data
+        mc_legs = []
+    else:
+        mc_overall = mc_data.get("overall", pd.DataFrame())
+        mc_legs = mc_data.get("legs", [])
+
+    if mc_overall.empty:
+        st.warning("No valid Monte Carlo data generated.")
+        st.stop()
+
+    ul = mc_overall["unit"].iloc[0]
     route_n = (f"{df_p['station_name'].iloc[0]} → {df_p['station_name'].iloc[-1]}"
                if df_p is not None else "")
 
-    st.markdown(f"### 🎲 Monte Carlo — {route_n}")
+    st.markdown(f"### 🎲 Monte Carlo Dashboard")
 
     if df_p is not None:
         tr = TrackProfile(df_p)
@@ -1836,136 +1916,154 @@ with tab_mc_t:
                 unsafe_allow_html=True)
         else:
             st.markdown(
-                f'<div class="info-box">ℹ️ Route has <b>{nm} mandatory (X)</b> and '
-                f'<b>{nr} request (R)</b> stops. MC sweeps the probability of '
+                f'<div class="info-box">ℹ️ Scenario route has <b>{nm} mandatory (X)</b> and '
+                f'<b>{nr} request (R)</b> total stops. MC sweeps the probability of '
                 f'serving request halts.</div>',
                 unsafe_allow_html=True)
 
     st.caption(f"N = {int(mc_n)} simulation runs per probability level")
 
-    disp = mc_df.copy()
-    disp["Mean time"] = disp["mean_t"].apply(fmt_dur)
-    disp["Fastest"]   = disp["min_t"].apply(fmt_dur)
-    disp["Slowest"]   = disp["max_t"].apply(fmt_dur)
-    show_map = {
-        "prob": "Probability",
-        "mean_e": f"Mean [{ul}]",  "std_e": f"Std [{ul}]",
-        "min_e":  f"Min [{ul}]",   "max_e": f"Max [{ul}]",
-        "savings": f"Savings [{ul}]",
-        "Mean time": "Mean time",  "Fastest": "Fastest", "Slowest": "Slowest",
-    }
-    disp2 = disp.rename(columns=show_map)
-    st.dataframe(
-        disp2[[v for v in show_map.values() if v in disp2.columns]],
-        use_container_width=True, hide_index=True,
-    )
-    st.download_button("⬇️ Download CSV",
-                        mc_df.to_csv(index=False).encode(),
-                        "mc_results.csv", "text/csv")
-    st.markdown("---")
+    def render_mc_dashboard(mc_df, title_str, route_desc, key_prefix):
+        st.markdown(f"#### {title_str}")
+        if route_desc:
+            st.markdown(f"**Route:** {route_desc}")
 
-    mc1, mc2 = st.columns(2)
-
-    with mc1:
-        fig_bar = go.Figure(go.Bar(
-            x=mc_df["prob"], y=mc_df["savings"],
-            marker=dict(color=mc_df["savings"], colorscale="Blues",
-                        showscale=True, colorbar=dict(title=ul, len=0.8)),
-            text=mc_df["savings"].round(2),
-            texttemplate="%{text}", textposition="outside",
-            hovertemplate="<b>%{x}</b><br>Savings: %{y:.2f} " + ul + "<extra></extra>",
-        ))
-        fig_bar.update_layout(
-            title=f"<b>Energy savings vs. all-stops</b> [{ul}]",
-            xaxis_title="Request-stop probability",
-            yaxis_title=f"Savings [{ul}]",
-            height=400, paper_bgcolor="white", plot_bgcolor="white",
-            margin=dict(t=60, b=50, l=60, r=20),
-            font=dict(family="Inter, sans-serif", size=12),
-            yaxis=dict(gridcolor=C["light"]),
+        disp = mc_df.copy()
+        disp["Mean time"] = disp["mean_t"].apply(fmt_dur)
+        disp["Fastest"]   = disp["min_t"].apply(fmt_dur)
+        disp["Slowest"]   = disp["max_t"].apply(fmt_dur)
+        show_map = {
+            "prob": "Probability",
+            "mean_e": f"Mean [{ul}]",  "std_e": f"Std [{ul}]",
+            "min_e":  f"Min [{ul}]",   "max_e": f"Max [{ul}]",
+            "savings": f"Savings [{ul}]",
+            "Mean time": "Mean time",  "Fastest": "Fastest", "Slowest": "Slowest",
+        }
+        disp2 = disp.rename(columns=show_map)
+        st.dataframe(
+            disp2[[v for v in show_map.values() if v in disp2.columns]],
+            use_container_width=True, hide_index=True,
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.download_button("⬇️ Download CSV",
+                           mc_df.to_csv(index=False).encode(),
+                           f"mc_results_{key_prefix}.csv", "text/csv",
+                           key=f"dl_mc_{key_prefix}")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    with mc2:
-        fig_err = go.Figure()
-        fig_err.add_trace(go.Scatter(
+        mc1, mc2 = st.columns(2)
+
+        with mc1:
+            fig_bar = go.Figure(go.Bar(
+                x=mc_df["prob"], y=mc_df["savings"],
+                marker=dict(color=mc_df["savings"], colorscale="Blues",
+                            showscale=True, colorbar=dict(title=ul, len=0.8)),
+                text=mc_df["savings"].round(2),
+                texttemplate="%{text}", textposition="outside",
+                hovertemplate="<b>%{x}</b><br>Savings: %{y:.2f} " + ul + "<extra></extra>",
+            ))
+            fig_bar.update_layout(
+                title=f"<b>Energy savings vs. all-stops</b> [{ul}]",
+                xaxis_title="Request-stop probability",
+                yaxis_title=f"Savings [{ul}]",
+                height=400, paper_bgcolor="white", plot_bgcolor="white",
+                margin=dict(t=60, b=50, l=60, r=20),
+                font=dict(family="Inter, sans-serif", size=12),
+                yaxis=dict(gridcolor=C["light"]),
+            )
+            st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_{key_prefix}")
+
+        with mc2:
+            fig_err = go.Figure()
+            fig_err.add_trace(go.Scatter(
+                x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
+                y=list(mc_df["max_e"]) + list(mc_df["min_e"].iloc[::-1]),
+                fill="toself", fillcolor=C["bg_blue"],
+                line=dict(color="rgba(255,255,255,0)"), name="Min–Max range",
+            ))
+            fig_err.add_trace(go.Scatter(
+                x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
+                y=list(mc_df["mean_e"] + mc_df["std_e"]) +
+                  list((mc_df["mean_e"] - mc_df["std_e"]).iloc[::-1]),
+                fill="toself", fillcolor="rgba(37,99,235,0.18)",
+                line=dict(color="rgba(255,255,255,0)"), name="Mean ± 1σ",
+            ))
+            fig_err.add_trace(go.Scatter(
+                x=mc_df["prob"], y=mc_df["mean_e"],
+                mode="markers+lines",
+                marker=dict(size=11, color=C["primary"], line=dict(color="white", width=2)),
+                line=dict(color=C["primary"], width=2.5), name="Mean",
+            ))
+            fig_err.update_layout(
+                title=f"<b>Energy distribution</b> [{ul}]",
+                xaxis_title="Request-stop probability",
+                yaxis_title=f"Energy [{ul}]",
+                height=400, paper_bgcolor="white", plot_bgcolor="white",
+                margin=dict(t=60, b=50, l=60, r=20),
+                font=dict(family="Inter, sans-serif", size=12),
+                yaxis=dict(gridcolor=C["light"]),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_err, use_container_width=True, key=f"err_{key_prefix}")
+
+        fig_t = go.Figure()
+        fig_t.add_trace(go.Scatter(
             x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
-            y=list(mc_df["max_e"]) + list(mc_df["min_e"].iloc[::-1]),
-            fill="toself", fillcolor=C["bg_blue"],
+            y=list(mc_df["max_t"] / 60) + list(mc_df["min_t"].iloc[::-1] / 60),
+            fill="toself", fillcolor=C["bg_orange"],
             line=dict(color="rgba(255,255,255,0)"), name="Min–Max range",
         ))
-        fig_err.add_trace(go.Scatter(
-            x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
-            y=list(mc_df["mean_e"] + mc_df["std_e"]) +
-              list((mc_df["mean_e"] - mc_df["std_e"]).iloc[::-1]),
-            fill="toself", fillcolor="rgba(37,99,235,0.18)",
-            line=dict(color="rgba(255,255,255,0)"), name="Mean ± 1σ",
-        ))
-        fig_err.add_trace(go.Scatter(
-            x=mc_df["prob"], y=mc_df["mean_e"],
+        fig_t.add_trace(go.Scatter(
+            x=mc_df["prob"], y=mc_df["mean_t"] / 60,
             mode="markers+lines",
-            marker=dict(size=11, color=C["primary"], line=dict(color="white", width=2)),
-            line=dict(color=C["primary"], width=2.5), name="Mean",
+            marker=dict(size=11, color=C["accent"], line=dict(color="white", width=2)),
+            line=dict(color=C["accent"], width=2.5), name="Mean time",
         ))
-        fig_err.update_layout(
-            title=f"<b>Energy distribution</b> [{ul}]",
+        fig_t.update_layout(
+            title="<b>Journey time vs. stopping policy</b>",
             xaxis_title="Request-stop probability",
-            yaxis_title=f"Energy [{ul}]",
-            height=400, paper_bgcolor="white", plot_bgcolor="white",
+            yaxis_title="Journey time [min]",
+            height=360, paper_bgcolor="white", plot_bgcolor="white",
             margin=dict(t=60, b=50, l=60, r=20),
             font=dict(family="Inter, sans-serif", size=12),
             yaxis=dict(gridcolor=C["light"]),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
-        st.plotly_chart(fig_err, use_container_width=True)
+        st.plotly_chart(fig_t, use_container_width=True, key=f"time_{key_prefix}")
 
-    fig_t = go.Figure()
-    fig_t.add_trace(go.Scatter(
-        x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
-        y=list(mc_df["max_t"] / 60) + list(mc_df["min_t"].iloc[::-1] / 60),
-        fill="toself", fillcolor=C["bg_orange"],
-        line=dict(color="rgba(255,255,255,0)"), name="Min–Max range",
-    ))
-    fig_t.add_trace(go.Scatter(
-        x=mc_df["prob"], y=mc_df["mean_t"] / 60,
-        mode="markers+lines",
-        marker=dict(size=11, color=C["accent"], line=dict(color="white", width=2)),
-        line=dict(color=C["accent"], width=2.5), name="Mean time",
-    ))
-    fig_t.update_layout(
-        title="<b>Journey time vs. stopping policy</b>",
-        xaxis_title="Request-stop probability",
-        yaxis_title="Journey time [min]",
-        height=360, paper_bgcolor="white", plot_bgcolor="white",
-        margin=dict(t=60, b=50, l=60, r=20),
-        font=dict(family="Inter, sans-serif", size=12),
-        yaxis=dict(gridcolor=C["light"]),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
-    st.plotly_chart(fig_t, use_container_width=True)
+        with st.expander("📊 Energy–time trade-off"):
+            fig_et = go.Figure(go.Scatter(
+                x=mc_df["mean_t"] / 60, y=mc_df["mean_e"],
+                mode="markers+text",
+                marker=dict(
+                    size=mc_df["savings"].clip(lower=0) * 3 + 14,
+                    color=mc_df["savings"], colorscale="RdYlGn", showscale=True,
+                    colorbar=dict(title=f"Savings [{ul}]"),
+                    line=dict(color="white", width=1.5),
+                ),
+                text=mc_df["prob"], textposition="top center",
+                hovertemplate=(
+                    "<b>%{text}</b><br>Time: %{x:.1f} min<br>"
+                    "Energy: %{y:.2f} " + ul + "<extra></extra>"
+                ),
+            ))
+            fig_et.update_layout(
+                title="<b>Energy–time trade-off</b> by stopping policy",
+                xaxis_title="Mean journey time [min]",
+                yaxis_title=f"Mean energy [{ul}]",
+                height=420, paper_bgcolor="white", plot_bgcolor="white",
+                margin=dict(t=60, b=50, l=60, r=20),
+                font=dict(family="Inter, sans-serif", size=12),
+            )
+            st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}")
 
-    with st.expander("📊 Energy–time trade-off"):
-        fig_et = go.Figure(go.Scatter(
-            x=mc_df["mean_t"] / 60, y=mc_df["mean_e"],
-            mode="markers+text",
-            marker=dict(
-                size=mc_df["savings"].clip(lower=0) * 3 + 14,
-                color=mc_df["savings"], colorscale="RdYlGn", showscale=True,
-                colorbar=dict(title=f"Savings [{ul}]"),
-                line=dict(color="white", width=1.5),
-            ),
-            text=mc_df["prob"], textposition="top center",
-            hovertemplate=(
-                "<b>%{text}</b><br>Time: %{x:.1f} min<br>"
-                "Energy: %{y:.2f} " + ul + "<extra></extra>"
-            ),
-        ))
-        fig_et.update_layout(
-            title="<b>Energy–time trade-off</b> by stopping policy",
-            xaxis_title="Mean journey time [min]",
-            yaxis_title=f"Mean energy [{ul}]",
-            height=420, paper_bgcolor="white", plot_bgcolor="white",
-            margin=dict(t=60, b=50, l=60, r=20),
-            font=dict(family="Inter, sans-serif", size=12),
-        )
-        st.plotly_chart(fig_et, use_container_width=True)
+        st.markdown("<hr>", unsafe_allow_html=True)
+
+
+    # Output the Overall Simulation Output
+    render_mc_dashboard(mc_overall, "Overall Scenario (Total Itinerary)", route_n, "overall")
+
+    # Iterate over Legs
+    if len(mc_legs) > 1:
+        for leg in mc_legs:
+            leg_route = f"{leg.get('start_name', 'Unknown')} → {leg.get('end_name', 'Unknown')}"
+            render_mc_dashboard(leg["df"], f"Leg {leg.get('leg_num', '?')}", leg_route, f"leg_{leg.get('leg_num', '?')}")
