@@ -470,6 +470,7 @@ class TrackProfile:
 class TrainSimulator:
     def __init__(self, mass_kg, length_m, max_power_kw, aux_power_kw,
                  max_accel, max_decel, traction_type, efficiency,
+                 regen_efficiency: float = 0.0,
                  max_speed_kmh: float = 160.0,
                  coast_threshold_m: float = 500.0,
                  comp_sys: list[str] = None):
@@ -484,7 +485,7 @@ class TrainSimulator:
 
         self.traction   = traction_type
         self.trac_eff   = efficiency if traction_type == "ELECTRIC" else 0.85
-        self.regen_eff  = 0.75 if traction_type == "ELECTRIC" else 0.0
+        self.regen_eff  = regen_efficiency
         self.aux_w      = aux_power_kw * 1_000.0
         self.max_w      = max_power_kw * 1_000.0
         self.max_accel  = max_accel
@@ -973,8 +974,8 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
         stops_set.add(df_plot.iloc[-1]["station_name"])
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.15,
-                        row_heights=[0.40, 0.15, 0.45],
+                        vertical_spacing=0.20,
+                        row_heights=[0.38, 0.17, 0.45],
                         subplot_titles=("Simulated Train Speed [km/h]",
                                         "Track Gradient [‰]",
                                         "Cumulative Energy [kWh]"))
@@ -1039,16 +1040,16 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
 
         for yref in ("y domain", "y3 domain"):
             annotations.append(dict(
-                x=x_pos, y=-0.18, xref="x", yref=yref,
+                x=x_pos, y=-0.25, xref="x", yref=yref,
                 text=sname, showarrow=False, font=dict(size=10, color=color),
                 xanchor="right", yanchor="top", textangle=-45))
 
-    xaxis_dict = dict(title=dict(text=x_title, standoff=90), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
+    xaxis_dict = dict(title=dict(text=x_title, standoff=110), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
     xaxis2_dict = dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False)
 
     fig.update_layout(
-        height=1050, margin=dict(l=60, r=40, t=70, b=180), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
+        height=1150, margin=dict(l=60, r=40, t=70, b=180), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes, annotations=annotations,
         paper_bgcolor="white", plot_bgcolor="white",
@@ -1243,15 +1244,23 @@ with st.sidebar:
         decel      = st.slider("Brake (m/s²)",  0.4, 1.5, 0.9, 0.05)
         efficiency = st.slider("Efficiency (%)", 15, 95, 35) / 100.0
         max_speed  = st.number_input("Max speed (km/h)", value=160, min_value=30, max_value=350)
-        diesel_d   = st.number_input("Diesel (kWh/L)", value=10.0, step=0.1)
     else:
         p = PREDEFINED_VEHICLES[veh]
         traction, mass, length = p["traction"], p["mass"], p["length"]
         power, aux_power       = p["power"], p["aux_power"]
         accel, decel, efficiency = p["accel"], p["decel"], p["efficiency"]
         max_speed              = p["max_speed"]
-        diesel_d = 10.0
+
     unit_lbl = "L fuel" if traction == "DIESEL" else "kWh"
+
+    # Global vehicle tweaks
+    if traction == "DIESEL":
+        diesel_d = st.slider("Diesel Energy Density (kWh/L)", 8.0, 12.0, 10.0, 0.1)
+        regen_efficiency = 0.0
+    else:
+        diesel_d = 10.0
+        regen_eff_default = p.get("regen_eff", 0.75) if veh != "Custom" else 0.75
+        regen_efficiency = st.slider("Recuperation Efficiency (%)", 0, 100, int(regen_eff_default * 100)) / 100.0
 
     if traction == "ELECTRIC":
         if veh == "Custom":
@@ -1336,6 +1345,7 @@ if btn_run and st.session_state.profile_df is not None:
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
                                    max_speed_kmh=max_speed,
+                                   regen_efficiency=regen_efficiency,
                                    coast_threshold_m=coast_threshold_m,
                                    comp_sys=st.session_state.comp_sys)
 
@@ -1389,6 +1399,7 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
             sim   = TrainSimulator(mass, length, power, aux_power,
                                    accel, decel, traction, efficiency,
                                    max_speed_kmh=max_speed,
+                                   regen_efficiency=regen_efficiency,
                                    coast_threshold_m=coast_threshold_m,
                                    comp_sys=st.session_state.comp_sys)
             rows_mc = []
