@@ -940,9 +940,9 @@ def make_route_map(df: pd.DataFrame, via_ops: list, parser: DYPODParser, show_ha
     return fig
 
 
-def make_kinematic_chart(hist: dict, stop_names: list[str],
-                         df_profile: pd.DataFrame,
-                         x_axis: str = "Distance (km)") -> go.Figure:
+def make_kinematic_charts(hist: dict, stop_names: list[str],
+                          df_profile: pd.DataFrame,
+                          x_axis: str = "Distance (km)") -> tuple[go.Figure, go.Figure, go.Figure]:
     base = pd.to_datetime("1970-01-01")
     time_dt = [base + pd.to_timedelta(s, unit="s") for s in hist["time_s"]]
     dist_km  = hist["km"]
@@ -980,51 +980,15 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
 
         all_stops_df = df_plot[df_plot["stop_type"].isin(["X","R"])]
 
-    # Omitting subplot_titles creates a massive, clean gap for the angled text!
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.25,
-                        row_heights=[0.40, 0.20, 0.40])
-
-    # Speed traces
-    fig.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
-        line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_data, y=hist["v_kmh"], name="Actual Speed",
-        line=dict(color=C["primary"], width=2.5),
-        fill="tozeroy", fillcolor=C["bg_blue"]), row=1, col=1)
-
-    # Gradient traces
-    if "grad" in hist:
-        g_arr = np.array(hist["grad"])
-        pos_g = np.clip(g_arr, 0, None)
-        neg_g = np.clip(g_arr, None, 0)
-
-        fig.add_trace(go.Scatter(x=x_data, y=pos_g, name="Uphill",
-            line=dict(color=C["red"], width=0, shape="hv"),
-            fill="tozeroy", fillcolor="rgba(220,38,38,0.55)", showlegend=False), row=2, col=1)
-        fig.add_trace(go.Scatter(x=x_data, y=neg_g, name="Downhill",
-            line=dict(color=C["primary"], width=0, shape="hv"),
-            fill="tozeroy", fillcolor="rgba(37,99,235,0.55)", showlegend=False), row=2, col=1)
-
-    # Energy traces
-    fig.add_trace(go.Scatter(x=x_data, y=hist["gross_kwh"], name="Gross Energy",
-        line=dict(color=C["yellow"], width=2)), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x_data, y=hist["regen_kwh"], name="Recuperated",
-        line=dict(color=C["green"], width=2, dash="dash")), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
-        line=dict(color=C["secondary"], width=2.5)), row=3, col=1)
-
-    # Station annotations
     v_max = max(max(hist["v_limit_kmh"]), max(hist["v_kmh"])) * 1.05 if hist["v_kmh"] else 10
-    e_max = max(hist["gross_kwh"]) * 1.05 if hist["gross_kwh"] else 1
-
-    g_max = max(hist["grad"]) * 1.1 if "grad" in hist and hist["grad"] else 5
-    g_min = min(hist["grad"]) * 1.1 if "grad" in hist and hist["grad"] else -5
-    if g_max < 1: g_max = 1
-    if g_min > -1: g_min = -1
-
     km_arr = np.array(hist["km"])
 
-    shapes: list[dict] = []; annotations: list[dict] = []
+    shapes_speed = []
+    annotations_speed = []
+    shapes_grad = []
+    shapes_energy = []
+    annotations_energy = []
+
     for _, srow in all_stops_df.iterrows():
         skm   = float(srow["cum_km"])
         stype = srow["stop_type"]
@@ -1034,40 +998,90 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
         idx   = int(np.argmin(np.abs(km_arr - skm)))
         x_pos = time_dt[idx] if use_time else float(dist_km[idx])
 
-        shapes += [
-            dict(type="line", xref="x", yref="y",  x0=x_pos, x1=x_pos,
-                 y0=0, y1=v_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
-            dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos,
-                 y0=g_min, y1=g_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
-            dict(type="line", xref="x", yref="y3", x0=x_pos, x1=x_pos,
-                 y0=0, y1=e_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
-        ]
+        line_dict = dict(type="line", xref="x", yref="paper", x0=x_pos, x1=x_pos,
+                         y0=0, y1=1, line=dict(color=color, width=1, dash="dot"), layer="below")
 
-        # Dual axis plotting: Places the text dynamically into the empty horizontal gaps
-        for yref, y_offset in [("y domain", -0.20), ("y3 domain", -0.20)]:
-            annotations.append(dict(
-                x=x_pos, y=y_offset, xref="x", yref=yref,
-                text=sname, showarrow=False, font=dict(size=10, color=color),
-                xanchor="right", yanchor="top", textangle=-45))
+        shapes_speed.append(line_dict)
+        shapes_grad.append(line_dict)
+        shapes_energy.append(line_dict)
 
-    xaxis_bottom_dict = dict(title=dict(text=x_title, standoff=120), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True)
-    xaxis_top_dict = dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False)
+        annot_dict = dict(x=x_pos, y=-0.20, xref="x", yref="paper",
+                          text=sname, showarrow=False, font=dict(size=10, color=color),
+                          xanchor="right", yanchor="top", textangle=-45)
 
-    fig.update_layout(
-        height=1000, margin=dict(l=100, r=40, t=40, b=180), hovermode="x unified",
+        annotations_speed.append(annot_dict)
+        annotations_energy.append(annot_dict)
+
+
+    # 1. SPEED CHART
+    fig_speed = go.Figure()
+    fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
+        line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")))
+    fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_kmh"], name="Actual Speed",
+        line=dict(color=C["primary"], width=2.5),
+        fill="tozeroy", fillcolor=C["bg_blue"]))
+
+    fig_speed.update_layout(
+        title="Simulated Train Speed",
+        height=400, margin=dict(l=60, r=40, t=40, b=120), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
-        shapes=shapes, annotations=annotations,
+        shapes=shapes_speed, annotations=annotations_speed,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=xaxis_top_dict,
-        xaxis2=xaxis_top_dict,
-        xaxis3=xaxis_bottom_dict
+        xaxis=dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False),
+        yaxis=dict(title_text="Speed [km/h]", showgrid=True, gridcolor=C["light"])
     )
-    fig.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, showgrid=True, gridcolor=C["light"])
-    fig.update_yaxes(title_text="Gradient [‰]",  row=2, col=1, showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
-    fig.update_yaxes(title_text="Energy [kWh]",  row=3, col=1, showgrid=True, gridcolor=C["light"])
-    return fig
+
+
+    # 2. GRADIENT CHART
+    fig_grad = go.Figure()
+    if "grad" in hist:
+        g_arr = np.array(hist["grad"])
+        pos_g = np.clip(g_arr, 0, None)
+        neg_g = np.clip(g_arr, None, 0)
+
+        fig_grad.add_trace(go.Scatter(x=x_data, y=pos_g, name="Uphill",
+            line=dict(color=C["red"], width=0, shape="hv"),
+            fill="tozeroy", fillcolor="rgba(220,38,38,0.55)", showlegend=False))
+        fig_grad.add_trace(go.Scatter(x=x_data, y=neg_g, name="Downhill",
+            line=dict(color=C["primary"], width=0, shape="hv"),
+            fill="tozeroy", fillcolor="rgba(37,99,235,0.55)", showlegend=False))
+
+    fig_grad.update_layout(
+        title="Track Gradient",
+        height=300, margin=dict(l=60, r=40, t=40, b=50), hovermode="x unified",
+        shapes=shapes_grad,
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="Inter, sans-serif", size=12),
+        xaxis=dict(range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=False),
+        yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
+    )
+
+
+    # 3. ENERGY CHART
+    fig_energy = go.Figure()
+    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["gross_kwh"], name="Gross Energy",
+        line=dict(color=C["yellow"], width=2),
+        fill="tozeroy", fillcolor="rgba(202,138,4,0.15)")) # Light overlay for gross energy
+    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["regen_kwh"], name="Recuperated",
+        line=dict(color=C["green"], width=2, dash="dash")))
+    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
+        line=dict(color=C["secondary"], width=2.5)))
+
+    fig_energy.update_layout(
+        title="Cumulative Energy",
+        height=400, margin=dict(l=60, r=40, t=40, b=120), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
+                    bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
+        shapes=shapes_energy, annotations=annotations_energy,
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="Inter, sans-serif", size=12),
+        xaxis=dict(title=dict(text=x_title, standoff=20), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
+    )
+
+    return fig_speed, fig_grad, fig_energy
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1182,9 +1196,9 @@ with st.sidebar:
         options = {f"{nm}": oid for oid, nm in results}
         chosen = st.selectbox(
             f"↳ {label}", options=list(options.keys()),
-            key=key_sel, label_visibility="collapsed",
+            key=key_sel, label_visibility="collapsed", index=None
         )
-        return options.get(chosen)
+        return options.get(chosen) if chosen else None
 
     scenario_mode = st.radio("Routing Mode", ["Single Journey", "Round-Trip / Shift", "Custom Itinerary"])
     st.session_state.scenario_mode = scenario_mode
@@ -1195,17 +1209,17 @@ with st.sidebar:
 
     if station_names:
         if scenario_mode == "Single Journey":
-            op_start_name = st.selectbox("🔍 Departure station", station_names, index=0)
-            op_end_name   = st.selectbox("🔍 Arrival station", station_names, index=len(station_names)-1)
-            op_start = station_dict.get(op_start_name)
-            op_end   = station_dict.get(op_end_name)
+            op_start_name = st.selectbox("🔍 Departure station", station_names, index=None)
+            op_end_name   = st.selectbox("🔍 Arrival station", station_names, index=None)
+            op_start = station_dict.get(op_start_name) if op_start_name else None
+            op_end   = station_dict.get(op_end_name) if op_end_name else None
 
         elif scenario_mode == "Round-Trip / Shift":
-            op_start_name = st.selectbox("🔍 Terminal A", station_names, index=0)
-            op_end_name   = st.selectbox("🔍 Terminal B", station_names, index=len(station_names)-1)
+            op_start_name = st.selectbox("🔍 Terminal A", station_names, index=None)
+            op_end_name   = st.selectbox("🔍 Terminal B", station_names, index=None)
             legs = st.number_input("Number of legs (1 direction = 1 leg)", min_value=2, max_value=20, value=2)
-            op_a = station_dict.get(op_start_name)
-            op_b = station_dict.get(op_end_name)
+            op_a = station_dict.get(op_start_name) if op_start_name else None
+            op_b = station_dict.get(op_end_name) if op_end_name else None
             if op_a and op_b:
                 seq = [op_a if i % 2 == 0 else op_b for i in range(legs + 1)]
                 op_start = seq[0]
@@ -1219,13 +1233,13 @@ with st.sidebar:
             seq_names = []
             for i in range(int(legs) + 1):
                 if i == 0:
-                    name = st.selectbox("Start Station", station_names, index=0, key=f"cust_{i}")
+                    name = st.selectbox("Start Station", station_names, index=None, key=f"cust_{i}")
                 else:
-                    name = st.selectbox(f"End of Leg {i}", station_names, index=min(i, len(station_names)-1), key=f"cust_{i}")
+                    name = st.selectbox(f"End of Leg {i}", station_names, index=None, key=f"cust_{i}")
                 seq_names.append(name)
 
-            seq = [station_dict.get(nm) for nm in seq_names]
-            if all(seq):
+            seq = [station_dict.get(nm) for nm in seq_names if nm]
+            if len(seq) == int(legs) + 1:
                 op_start = seq[0]
                 op_end = seq[-1]
                 scenario_vias = seq[1:-1]
@@ -1366,6 +1380,8 @@ if btn_run and st.session_state.profile_df is not None:
                 df_leg["cum_km"] -= start_km
 
                 track_leg = TrackProfile(df_leg)
+                total_leg_stops = len(track_leg.stations)
+
                 hist_leg, snames_leg, stats_leg = sim.run(track_leg, stop_mode=stop_mode, stop_prob=stop_prob, dwell=dwell, record=True)
                 _, _, stats_worst_leg = sim.run(track_leg, stop_mode="all", stop_prob=1.0, dwell=dwell, record=False)
 
@@ -1377,7 +1393,8 @@ if btn_run and st.session_state.profile_df is not None:
                     "hist": hist_leg,
                     "stats": stats_leg,
                     "stats_worst": stats_worst_leg,
-                    "snames": snames_leg
+                    "snames": snames_leg,
+                    "total_possible_stops": total_leg_stops
                 })
 
                 total_gross += stats_leg["gross_kwh"]
@@ -1746,10 +1763,9 @@ with tab_run_t:
         st.markdown(f"### Leg {leg.get('leg_num', 1)}: {leg.get('start_name', '')} ➔ {leg.get('end_name', '')}")
 
         leg_snames = leg.get("snames", [])
-        if leg_snames:
-            st.markdown("**Stops served:** " + "  →  ".join(f"*{s}*" for s in leg_snames))
-        else:
-            st.caption("No intermediate stops served on this leg.")
+        total_possible = leg.get("total_possible_stops", len(leg_snames))
+
+        st.markdown(f"**Stops served ({len(leg_snames)} / {total_possible}):** " + ("  →  ".join(f"*{s}*" for s in leg_snames) if leg_snames else "None"))
 
         leg_stats = leg.get("stats", {})
         leg_worst = leg.get("stats_worst", leg_stats)
@@ -1774,10 +1790,12 @@ with tab_run_t:
             lk5.metric(f"Specific Energy", f"{leg_stats.get('net_kwh', 0)/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
 
         if leg.get("hist"):
-            fig_kin = make_kinematic_chart(leg["hist"], leg_snames, df_leg_ref, x_axis=x_axis_choice)
-            st.plotly_chart(fig_kin, use_container_width=True, key=f"kin_chart_leg_{leg.get('leg_num', 1)}")
+            fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], leg_snames, df_leg_ref, x_axis=x_axis_choice)
+            st.plotly_chart(fig_s, use_container_width=True, key=f"kin_s_{leg.get('leg_num', 1)}")
+            st.plotly_chart(fig_g, use_container_width=True, key=f"kin_g_{leg.get('leg_num', 1)}")
+            st.plotly_chart(fig_e, use_container_width=True, key=f"kin_e_{leg.get('leg_num', 1)}")
 
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("<hr>", unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
