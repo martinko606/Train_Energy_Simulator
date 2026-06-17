@@ -12,7 +12,7 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Multi-Leg Scenario Builder (Round-Trips, Custom Itineraries)
 • Electric coasting through short incompatible/non-electrified gaps (configurable)
 • Physics simulation with dynamic Davis equation & vehicle max-speed cap
-• Kinematic chart with time/distance X-axis toggle & station annotations
+• Kinematic chart with time/distance X-axis toggle, gradient ribbon & station annotations
 • Monte Carlo stochastic stop-probability analysis with progress bar
 Run:  streamlit run app.py
 """
@@ -528,7 +528,7 @@ class TrainSimulator:
 
         v = dist = e_j = r_j = t_s = 0.0
         hist = {k: [] for k in ("time_s", "km", "v_kmh", "v_limit_kmh",
-                                 "gross_kwh", "regen_kwh", "net_kwh")} if record else None
+                                 "gross_kwh", "regen_kwh", "net_kwh", "grad")} if record else None
 
         # Watchdog limit to prevent infinite loops on impossible climbs
         max_iters = int(total_m / 0.1) + 36000
@@ -582,21 +582,22 @@ class TrainSimulator:
                 hist["gross_kwh"].append(e_j / 3_600_000.0)
                 hist["regen_kwh"].append(r_j / 3_600_000.0)
                 hist["net_kwh"].append((e_j - r_j) / 3_600_000.0)
+                hist["grad"].append(slope * 1000.0)
 
             v_eff  = max(v, 0.5)
             mech_p = reg_p = 0.0
 
-            if coasting:
-                f_res = self._res(v)
-                v     = max(0.0, v - (f_res + f_grad) / self.eff_mass)
-
-            elif v > max_safe + 1e-4:
+            if v > max_safe + 1e-4:
                 f_res    = self._res(v)
                 nat_d    = (f_res + f_grad) / self.eff_mass
                 brk      = max(0.0, min(self.max_decel, (v - max_safe) - nat_d))
                 if recup_ok and not coasting:
                     reg_p = self.eff_mass * brk * v * self.regen_eff
                 v = max(0.0, v - (brk + nat_d))
+
+            elif coasting:
+                f_res = self._res(v)
+                v     = max(0.0, v - (f_res + f_grad) / self.eff_mass)
 
             elif v < min(v_lim, max_safe) - 1e-4:
                 f_res  = self._res(v)
@@ -629,6 +630,7 @@ class TrainSimulator:
                         hist["gross_kwh"].append(e_j / 3_600_000.0)
                         hist["regen_kwh"].append(r_j / 3_600_000.0)
                         hist["net_kwh"].append((e_j - r_j) / 3_600_000.0)
+                        hist["grad"].append(slope * 1000.0)
                         if pass_no == 0:
                             e_j += self.aux_w * dwell
                             t_s += dwell
@@ -958,33 +960,62 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
         x_fmt = None; x_title = "Cumulative distance [km]"
 
     stops_set = set(stop_names)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.18,
+
+    # Force inclusion of start and end stations to ensure they are fully visible
+    # on the axis regardless of stop filtering logic
+    all_stops_df = pd.DataFrame()
+    if df_profile is not None and not df_profile.empty:
+        df_plot = df_profile.copy()
+        df_plot.loc[df_plot.index[0], "stop_type"] = "X"
+        df_plot.loc[df_plot.index[-1], "stop_type"] = "X"
+        all_stops_df = df_plot[df_plot["stop_type"].isin(["X","R"])]
+        stops_set.add(df_plot.iloc[0]["station_name"])
+        stops_set.add(df_plot.iloc[-1]["station_name"])
+
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.10,
+                        row_heights=[0.45, 0.15, 0.40],
                         subplot_titles=("Simulated Train Speed [km/h]",
+                                        "Track Gradient [‰]",
                                         "Cumulative Energy [kWh]"))
 
     # Speed traces
     fig.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
-        line=dict(color=C["red"], dash="dash", width=1.8, shape="hv")), row=1, col=1)
+        line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")), row=1, col=1)
     fig.add_trace(go.Scatter(x=x_data, y=hist["v_kmh"], name="Actual Speed",
         line=dict(color=C["primary"], width=2.5),
         fill="tozeroy", fillcolor=C["bg_blue"]), row=1, col=1)
 
+    # Gradient traces
+    if "grad" in hist:
+        g_arr = np.array(hist["grad"])
+        pos_g = np.clip(g_arr, 0, None)
+        neg_g = np.clip(g_arr, None, 0)
+
+        fig.add_trace(go.Scatter(x=x_data, y=pos_g, name="Uphill",
+            line=dict(color=C["red"], width=0, shape="hv"),
+            fill="tozeroy", fillcolor="rgba(220,38,38,0.55)", showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=x_data, y=neg_g, name="Downhill",
+            line=dict(color=C["primary"], width=0, shape="hv"),
+            fill="tozeroy", fillcolor="rgba(37,99,235,0.55)", showlegend=False), row=2, col=1)
+
     # Energy traces
     fig.add_trace(go.Scatter(x=x_data, y=hist["gross_kwh"], name="Gross Energy",
-        line=dict(color=C["yellow"], width=2),
-        fill="tozeroy", fillcolor="rgba(202,138,4,0.10)"), row=2, col=1)
+        line=dict(color=C["yellow"], width=2)), row=3, col=1)
     fig.add_trace(go.Scatter(x=x_data, y=hist["regen_kwh"], name="Recuperated",
-        line=dict(color=C["green"], width=2, dash="dash"),
-        fill="tozeroy", fillcolor="rgba(22,163,74,0.10)"), row=2, col=1)
+        line=dict(color=C["green"], width=2, dash="dash")), row=3, col=1)
     fig.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
-        line=dict(color=C["secondary"], width=2.5)), row=2, col=1)
+        line=dict(color=C["secondary"], width=2.5)), row=3, col=1)
 
     # Station annotations
     v_max = max(max(hist["v_limit_kmh"]), max(hist["v_kmh"])) * 1.05 if hist["v_kmh"] else 10
     e_max = max(hist["gross_kwh"]) * 1.05 if hist["gross_kwh"] else 1
 
+    g_max = max(hist["grad"]) * 1.1 if "grad" in hist and hist["grad"] else 5
+    g_min = min(hist["grad"]) * 1.1 if "grad" in hist and hist["grad"] else -5
+    if g_max < 1: g_max = 1
+    if g_min > -1: g_min = -1
+
     km_arr = np.array(hist["km"])
-    all_stops_df = df_profile[df_profile["stop_type"].isin(["X","R"])] if df_profile is not None else pd.DataFrame()
 
     shapes: list[dict] = []; annotations: list[dict] = []
     for _, srow in all_stops_df.iterrows():
@@ -1000,17 +1031,20 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
             dict(type="line", xref="x", yref="y",  x0=x_pos, x1=x_pos,
                  y0=0, y1=v_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
             dict(type="line", xref="x", yref="y2", x0=x_pos, x1=x_pos,
+                 y0=g_min, y1=g_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
+            dict(type="line", xref="x", yref="y3", x0=x_pos, x1=x_pos,
                  y0=0, y1=e_max, line=dict(color=color, width=1, dash="dot"), layer="below"),
         ]
-        for yref in ("y domain", "y2 domain"):
-            annotations.append(dict(
-                x=x_pos, y=-0.18, xref="x", yref=yref,
-                text=sname, showarrow=False, font=dict(size=10, color=color),
-                xanchor="right", yanchor="top", textangle=-45))
+
+        # Place label explicitly under the bottom trace (y3)
+        annotations.append(dict(
+            x=x_pos, y=-0.18, xref="x", yref="y3 domain",
+            text=sname, showarrow=False, font=dict(size=10, color=color),
+            xanchor="right", yanchor="top", textangle=-45))
 
     fig.update_layout(
-        height=820, margin=dict(l=60, r=40, t=70, b=140), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0,
+        height=950, margin=dict(l=60, r=40, t=70, b=160), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes, annotations=annotations,
         paper_bgcolor="white", plot_bgcolor="white",
@@ -1019,7 +1053,8 @@ def make_kinematic_chart(hist: dict, stop_names: list[str],
     fig.update_xaxes(title_text=x_title, range=[x_min, x_max],
                      tickformat=x_fmt, showgrid=True, gridcolor=C["light"])
     fig.update_yaxes(title_text="Speed [km/h]",  row=1, col=1, showgrid=True, gridcolor=C["light"])
-    fig.update_yaxes(title_text="Energy [kWh]",  row=2, col=1, showgrid=True, gridcolor=C["light"])
+    fig.update_yaxes(title_text="Gradient [‰]",  row=2, col=1, showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
+    fig.update_yaxes(title_text="Energy [kWh]",  row=3, col=1, showgrid=True, gridcolor=C["light"])
     return fig
 
 
