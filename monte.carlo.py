@@ -554,7 +554,7 @@ class TrainSimulator:
 
             coasting = False
             if self.traction == "ELECTRIC" and (self.comp_sys is not None and electr not in self.comp_sys):
-                gap_m = seg.get("ue_gap_m", 0.0)
+                gap_m = track.get_incompatible_gap(km, self.comp_sys)
                 if gap_m <= self.coast_threshold_m:
                     coasting = True
                 else:
@@ -568,7 +568,7 @@ class TrainSimulator:
             eff_decel = max(0.05, self.max_decel + g * slope)
 
             max_safe = v_lim
-            next_stop = next((s for s in stops_km if s >= km - 0.01), None)
+            next_stop = stops_km[0] if stops_km else None
             if next_stop is not None:
                 d2s = (next_stop - km) * 1000.0
                 max_safe = min(max_safe, math.sqrt(max(0.0, 2.0 * eff_decel * d2s)))
@@ -594,7 +594,7 @@ class TrainSimulator:
                 f_res    = self._res(v)
                 nat_d    = (f_res + f_grad) / self.eff_mass
                 brk      = max(0.0, min(self.max_decel, (v - max_safe) - nat_d))
-                if recup_ok:
+                if recup_ok and not coasting:
                     reg_p = self.eff_mass * brk * v * self.regen_eff
                 v = max(0.0, v - (brk + nat_d))
 
@@ -617,7 +617,7 @@ class TrainSimulator:
             dist   += v * dt
             t_s    += dt
 
-            if v < 0.5 and any(abs(km - s) <= 0.05 for s in stops_km):
+            if v < 0.5 and any(abs(km - s) <= 0.1 for s in stops_km):
                 v = 0.0
                 if hist is not None:
                     for pass_no in range(2):
@@ -636,10 +636,10 @@ class TrainSimulator:
                     e_j += self.aux_w * dwell
                     t_s += dwell
 
-                if any(abs(track.total_km - s) <= 0.05 for s in stops_km if abs(km - s) <= 0.05):
+                if any(abs(track.total_km - s) <= 0.1 for s in stops_km if abs(km - s) <= 0.1):
                     break
 
-                stops_km = [s for s in stops_km if abs(s - km) > 0.05]
+                stops_km = [s for s in stops_km if abs(s - km) > 0.1]
 
         return hist, stop_names, dict(
             gross_kwh      = e_j / 3_600_000.0,
@@ -659,7 +659,11 @@ def fmt_dur(s: float) -> str:
     return f"{h:02d}h {m:02d}m {sc:02d}s" if h else f"{m:02d}m {sc:02d}s"
 
 def to_unit(stats: dict, traction: str, density: float, eff: float) -> float:
-    return stats["net_kwh"] / (density * eff) if traction == "DIESEL" else stats["net_kwh"]
+    # Graceful fallback handler for cached sessions
+    if not isinstance(stats, dict):
+        return 0.0
+    val = stats.get("net_kwh", 0.0)
+    return val / (density * eff) if traction == "DIESEL" else val
 
 def elec_color(label: str) -> str:
     for k, v in ELEC_COLORS.items():
@@ -1626,19 +1630,32 @@ with tab_run_t:
         st.info("👈 Build a profile, then click **▶️ Run** in the sidebar.")
         st.stop()
 
+    if st.session_state.get("scenario_mode") != "Single Journey":
+        st.info("ℹ️ **Scenario Mode Active:** The simulation below displays one sample leg (Leg 1) for visual clarity. The Monte Carlo tab evaluates the full scenario.")
+
+    # Fallback to handle cached sessions that lack the newer multi-leg dictionary keys
     legs_data   = rep.get("leg_results", [])
-    total_stats = rep.get("total_stats", {})
-    total_net_w = rep.get("total_net_worst", 0.0)
-    _tr         = rep["traction"]
-    _dd         = rep["diesel_d"]
-    _eff        = rep["efficiency"]
-    unit_lbl    = rep["unit_lbl"]
+    total_stats = rep.get("total_stats", rep.get("stats", {}))
+    total_net_w = rep.get("total_net_worst", total_stats.get("net_kwh", 0.0))
+
+    _tr         = rep.get("traction", "ELECTRIC")
+    _dd         = rep.get("diesel_d", 10.0)
+    _eff        = rep.get("efficiency", 0.85)
+    unit_lbl    = rep.get("unit_lbl", "kWh")
 
     consumed       = to_unit(total_stats, _tr, _dd, _eff)
     consumed_worst = to_unit({"net_kwh": total_net_w}, _tr, _dd, _eff)
     saved_amount   = consumed_worst - consumed
 
-    st.markdown(f"### ▶️ Simulation Results  ·  {rep['vehicle_name']}")
+    df_p   = rep.get("sample_df", st.session_state.profile_df)
+    tot_km = float(df_p["cum_km"].max()) if df_p is not None and not df_p.empty else 0.0
+
+    j_time = total_stats.get("journey_time_s", 0)
+    avg_spd = tot_km / (j_time / 3600) if j_time > 0 else 0
+    sn_r   = df_p["station_name"].iloc[0]  if df_p is not None and not df_p.empty else ""
+    en_r   = df_p["station_name"].iloc[-1] if df_p is not None and not df_p.empty else ""
+
+    st.markdown(f"### ▶️ Simulation Results  ·  {rep.get('vehicle_name', 'Vehicle')}")
 
     st.markdown("#### Overall Scenario Statistics")
     kc2 = st.columns(5)
@@ -1650,29 +1667,49 @@ with tab_run_t:
 
     kc2[3].markdown(kpi_card(f"{total_stats.get('regen_kwh', 0):.1f}", "Total Recuperated [kWh]"), unsafe_allow_html=True)
 
-    total_stops = sum(len(l["snames"]) for l in legs_data)
+    # Safely compute total stops
+    total_stops = sum(len(l.get("snames", [])) for l in legs_data)
+    if not legs_data and "stop_names" in rep:
+        total_stops = len(rep["stop_names"])
+
     kc2[4].markdown(kpi_card(str(total_stops), "Total Stops Served"), unsafe_allow_html=True)
     st.write("---")
 
-    for leg in legs_data:
-        st.markdown(f"### Leg {leg['leg_num']}: {leg['start_name']} ➔ {leg['end_name']}")
+    # Handle legacy single-leg runs visually gracefully
+    if not legs_data and "hist" in rep:
+        legs_data = [{
+            "leg_num": 1,
+            "start_name": sn_r,
+            "end_name": en_r,
+            "df_leg": df_p,
+            "hist": rep.get("hist"),
+            "stats": rep.get("stats", {}),
+            "stats_worst": rep.get("stats_worst", rep.get("stats", {})),
+            "snames": rep.get("stop_names", [])
+        }]
 
-        leg_snames = leg["snames"]
+    for leg in legs_data:
+        st.markdown(f"### Leg {leg.get('leg_num', 1)}: {leg.get('start_name', '')} ➔ {leg.get('end_name', '')}")
+
+        leg_snames = leg.get("snames", [])
         if leg_snames:
             st.markdown("**Stops served:** " + "  →  ".join(f"*{s}*" for s in leg_snames))
         else:
             st.caption("No intermediate stops served on this leg.")
 
-        leg_stats = leg["stats"]
-        leg_worst = leg["stats_worst"]
+        leg_stats = leg.get("stats", {})
+        leg_worst = leg.get("stats_worst", leg_stats)
         leg_cons  = to_unit(leg_stats, _tr, _dd, _eff)
         leg_cons_w= to_unit(leg_worst, _tr, _dd, _eff)
         leg_saved = leg_cons_w - leg_cons
-        leg_dist  = leg["df_leg"]["cum_km"].max() if not leg["df_leg"].empty else 0.0
-        leg_avg_spd = leg_dist / (leg_stats["journey_time_s"]/3600) if leg_stats["journey_time_s"] > 0 else 0
+
+        df_leg_ref = leg.get("df_leg", pd.DataFrame())
+        leg_dist  = df_leg_ref["cum_km"].max() if not df_leg_ref.empty else 0.0
+        j_time_leg = leg_stats.get("journey_time_s", 0)
+        leg_avg_spd = leg_dist / (j_time_leg/3600) if j_time_leg > 0 else 0
 
         lk1, lk2, lk3, lk4, lk5 = st.columns(5)
-        lk1.metric("Time", fmt_dur(leg_stats["journey_time_s"]))
+        lk1.metric("Time", fmt_dur(j_time_leg))
         lk2.metric(f"Consumed [{unit_lbl}]", f"{leg_cons:.1f}")
         lk3.metric(f"Saved [{unit_lbl}]", f"{leg_saved:.1f}")
         lk4.metric("Avg Speed", f"{leg_avg_spd:.1f} km/h")
@@ -1680,11 +1717,11 @@ with tab_run_t:
         if _tr == "DIESEL":
             lk5.metric(f"Specific Fuel", f"{leg_cons/leg_dist*1000:.1f} mL/km" if leg_dist > 0 else "0.0")
         else:
-            lk5.metric(f"Specific Energy", f"{leg_stats['net_kwh']/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
+            lk5.metric(f"Specific Energy", f"{leg_stats.get('net_kwh', 0)/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
 
-        if leg["hist"]:
-            fig_kin = make_kinematic_chart(leg["hist"], leg_snames, leg["df_leg"], x_axis=x_axis_choice)
-            st.plotly_chart(fig_kin, use_container_width=True, key=f"kin_chart_leg_{leg['leg_num']}")
+        if leg.get("hist"):
+            fig_kin = make_kinematic_chart(leg["hist"], leg_snames, df_leg_ref, x_axis=x_axis_choice)
+            st.plotly_chart(fig_kin, use_container_width=True, key=f"kin_chart_leg_{leg.get('leg_num', 1)}")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
