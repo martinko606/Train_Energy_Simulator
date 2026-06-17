@@ -946,6 +946,8 @@ _SS_DEFAULTS = dict(
     parser=None, xml_path=None, profile_df=None, via_ops=[],
     rep_result=None, mc_result=None, elec_analysis=None,
     op_start=None, op_end=None, comp_sys=None, combined_vias=[],
+    rebuild_profile=False, scenario_mode="Single Journey",
+    first_leg_dest=None, last_uploaded_id=None
 )
 for k, v in _SS_DEFAULTS.items():
     if k not in st.session_state:
@@ -972,6 +974,7 @@ with st.sidebar:
             for k, v in _SS_DEFAULTS.items():
                 st.session_state[k] = v
             st.session_state.xml_path = xp
+            st.session_state.last_uploaded_id = file_id
         xml_path = st.session_state.xml_path
     else:
         local = sorted(
