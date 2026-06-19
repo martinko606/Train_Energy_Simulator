@@ -49,11 +49,11 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
     "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "EDITA+Btax":                  dict(traction="DIESEL",  mass=42_000,  length=30,     power=250,   aux_power=25, accel=0.4, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "Regionova (Class 814)":       dict(traction="DIESEL",  mass=39_600,  length=28.44,  power=242,   aux_power=10, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
-    "RegioNova Duo (Class 840)":   dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=514,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=100, systems=[]),
+    "Regiospider (Class 840)":     dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=530,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=100, systems=[]),
     "750-7 + 3 coaches":           dict(traction="DIESEL",  mass=207_000, length=90.16,  power=1_550, aux_power=40, accel=0.4, decel=0.8, efficiency=0.30, max_speed=100, systems=[]),
     "Regiopanter 3-car (Cl. 640)": dict(traction="ELECTRIC",mass=159_000, length=79.4,   power=2_040, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz", "25,000V/50Hz"]),
-    "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=155_000, length=79,     power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz"]),
-    "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=380_000, length=157.9,  power=5_500, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200, systems=["3,000V/0Hz", "25,000V/50Hz", "15,000V/16.7Hz"]),
+    "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=160_000, length=79.2,   power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz"]),
+    "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=395_000, length=185.3,  power=3_920, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200, systems=["3,000V/0Hz", "25,000V/50Hz", "15,000V/16.7Hz"]),
 }
 
 
@@ -1005,7 +1005,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes_grad.append(line_dict)
         shapes_energy.append(line_dict)
 
-        annot_dict = dict(x=x_pos, y=-0.20, xref="x", yref="paper",
+        annot_dict = dict(x=x_pos, y=-0.25, xref="x", yref="paper",
                           text=sname, showarrow=False, font=dict(size=10, color=color),
                           xanchor="right", yanchor="top", textangle=-45)
 
@@ -1022,13 +1022,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         fill="tozeroy", fillcolor=C["bg_blue"]))
 
     fig_speed.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=140), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=150), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_speed, annotations=annotations_speed,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=110), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Speed [km/h]", showgrid=True, gridcolor=C["light"])
     )
 
@@ -1052,7 +1052,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes=shapes_grad,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=20), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     )
 
@@ -1068,13 +1068,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         line=dict(color=C["secondary"], width=2.5)))
 
     fig_energy.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=160), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=150), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_energy, annotations=annotations_energy,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=110), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
     )
 
@@ -1107,7 +1107,7 @@ h3{color:#1E3A5F;font-size:1.2rem}
 </style>""", unsafe_allow_html=True)
 
 _SS_DEFAULTS = dict(
-    parser=None, xml_path=None, profile_df=None, via_ops=[],
+    parser=None, xml_path=None, profile_df=None, via_ops={},
     rep_result=None, mc_result=None, elec_analysis=None,
     op_start=None, op_end=None, comp_sys=None, combined_vias=[],
     rebuild_profile=False, scenario_mode="Single Journey",
@@ -1116,6 +1116,9 @@ _SS_DEFAULTS = dict(
 for k, v in _SS_DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+if isinstance(st.session_state.via_ops, list):
+    st.session_state.via_ops = {}
 
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -1247,6 +1250,7 @@ with st.sidebar:
         st.warning("No passenger stations found in the data.")
 
     is_valid_route = bool(op_start and op_end and (op_start != op_end or scenario_vias))
+    st.session_state.scenario_terminals = [op_start] + scenario_vias + [op_end] if is_valid_route else []
 
     st.markdown('<div class="sec">🚃 Vehicle</div>', unsafe_allow_html=True)
     veh = st.selectbox("Preset", ["Custom"] + list(PREDEFINED_VEHICLES.keys()), label_visibility="collapsed")
@@ -1325,8 +1329,14 @@ with st.sidebar:
 if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
     st.session_state.rebuild_profile = False
     pen = pen_km * 1000.0 if elec_reroute else 0.0
-    combined_vias = st.session_state.via_ops + scenario_vias
-    scenario_terminals = [op_start] + scenario_vias + [op_end]
+
+    terminals = st.session_state.scenario_terminals
+    combined_vias = []
+    for i in range(len(terminals) - 1):
+        leg_vias = st.session_state.via_ops.get(i + 1, [])
+        combined_vias.extend(leg_vias)
+        if i < len(terminals) - 2:
+            combined_vias.append(terminals[i+1])
 
     with st.spinner("Finding path and building continuous profile…"):
         ea  = parser.analyse_electrification(op_start, op_end, via_ops=combined_vias, comp_sys=comp_sys)
@@ -1338,8 +1348,7 @@ if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
     else:
         st.session_state.update(profile_df=df, op_start=op_start, op_end=op_end,
                                 elec_analysis=ea, rep_result=None, mc_result=None,
-                                comp_sys=comp_sys, combined_vias=combined_vias,
-                                scenario_terminals=scenario_terminals)
+                                comp_sys=comp_sys, combined_vias=combined_vias)
 
 if btn_run and st.session_state.profile_df is not None:
     with st.spinner("Running kinematic physics simulation…"):
@@ -1673,44 +1682,69 @@ with tab_edit:
 
     # Via waypoints
     st.markdown('<div class="sec">📍 Manual Routing Waypoints</div>', unsafe_allow_html=True)
-    if st.session_state.get("scenario_mode") != "Single Journey":
-        st.caption("ℹ️ **Note:** You are using a multi-leg scenario. Any manual routing waypoints added here will be applied to the **first leg** of the journey to force specific routing. Rebuilds profile automatically.")
+
+    terminals = st.session_state.get("scenario_terminals", [])
+    num_legs = max(1, len(terminals) - 1)
+
+    if num_legs > 1:
+        st.caption("ℹ️ **Note:** You are using a multi-leg scenario. Select a specific leg to add waypoints to force independent routing per direction. Rebuilds profile automatically.")
     else:
         st.caption("Force the route through specific intermediate stations. Rebuilds profile automatically.")
 
     station_dict = {nm: oid for nm, oid in parser.station_list}
     station_names = list(station_dict.keys())
 
-    cva, cvb = st.columns([3,1])
-    via_sel_name = cva.selectbox("Search waypoint to add", options=station_names, index=None, placeholder="Type to search e.g. Pardubice...", label_visibility="collapsed", key="via_opt")
+    if num_legs > 1:
+        cva, cvb, cvc = st.columns([3, 3, 1])
+        via_sel_name = cva.selectbox("Search waypoint to add", options=station_names, index=None, placeholder="Type to search e.g. Pardubice...", label_visibility="collapsed", key="via_opt")
+        leg_opts = {f"Leg {i+1}: {parser.op_name(terminals[i])} → {parser.op_name(terminals[i+1])}": i+1 for i in range(num_legs)}
+        selected_leg_label = cvb.selectbox("Select Leg", options=list(leg_opts.keys()), label_visibility="collapsed", key="leg_opt")
+        selected_leg = leg_opts.get(selected_leg_label, 1)
+        btn_col = cvc
+    else:
+        cva, cvb = st.columns([3,1])
+        via_sel_name = cva.selectbox("Search waypoint to add", options=station_names, index=None, placeholder="Type to search e.g. Pardubice...", label_visibility="collapsed", key="via_opt")
+        selected_leg = 1
+        btn_col = cvb
 
-    if cvb.button("➕ Add", use_container_width=True, disabled=not via_sel_name):
+    if btn_col.button("➕ Add", use_container_width=True, disabled=not via_sel_name):
         via_op = station_dict.get(via_sel_name)
-        if via_op and via_op not in st.session_state.via_ops:
-            st.session_state.via_ops.append(via_op)
-            st.session_state.rebuild_profile = True
-            st.rerun()
+        if via_op:
+            if selected_leg not in st.session_state.via_ops:
+                st.session_state.via_ops[selected_leg] = []
+            if via_op not in st.session_state.via_ops[selected_leg]:
+                st.session_state.via_ops[selected_leg].append(via_op)
+                st.session_state.rebuild_profile = True
+                st.rerun()
 
-    if st.session_state.via_ops:
-        st.markdown("**Manual routing waypoints (in order):**")
-        for i, vid in enumerate(st.session_state.via_ops):
-            info = parser.op_info.get(vid,{})
-            e1,e2,e3,e4 = st.columns([0.25,0.25,3,1])
-            e1.markdown(f"**{i+1}**")
-            if e2.button("↑", key=f"up_{i}", disabled=i==0):
-                st.session_state.via_ops[i], st.session_state.via_ops[i-1] = \
-                    st.session_state.via_ops[i-1], st.session_state.via_ops[i]
-                st.session_state.rebuild_profile = True
-                st.rerun()
-            e3.markdown(f"📍 **{info.get('name',vid)}** "
-                         f"<span style='color:{C['grey']};font-size:.8rem'>"
-                         f"{', '.join(info.get('types',[]))}</span>", unsafe_allow_html=True)
-            if e4.button("✕ Remove", key=f"rm_{i}", use_container_width=True):
-                st.session_state.via_ops.pop(i)
-                st.session_state.rebuild_profile = True
-                st.rerun()
+    if any(st.session_state.via_ops.values()):
+        st.markdown("**Manual routing waypoints:**")
+        for leg_idx in sorted(st.session_state.via_ops.keys()):
+            if not st.session_state.via_ops.get(leg_idx):
+                continue
+            if num_legs > 1:
+                t_a = parser.op_name(terminals[leg_idx-1]) if leg_idx-1 < len(terminals) else "?"
+                t_b = parser.op_name(terminals[leg_idx]) if leg_idx < len(terminals) else "?"
+                st.markdown(f"**Leg {leg_idx}: {t_a} ➔ {t_b}**")
+
+            for i, vid in enumerate(st.session_state.via_ops[leg_idx]):
+                info = parser.op_info.get(vid,{})
+                e1,e2,e3,e4 = st.columns([0.25,0.25,3,1])
+                e1.markdown(f"**{i+1}**")
+                if e2.button("↑", key=f"up_{leg_idx}_{i}", disabled=i==0):
+                    vlist = st.session_state.via_ops[leg_idx]
+                    vlist[i], vlist[i-1] = vlist[i-1], vlist[i]
+                    st.session_state.rebuild_profile = True
+                    st.rerun()
+                e3.markdown(f"📍 **{info.get('name',vid)}** "
+                             f"<span style='color:{C['grey']};font-size:.8rem'>"
+                             f"{', '.join(info.get('types',[]))}</span>", unsafe_allow_html=True)
+                if e4.button("✕ Remove", key=f"rm_{leg_idx}_{i}", use_container_width=True):
+                    st.session_state.via_ops[leg_idx].pop(i)
+                    st.session_state.rebuild_profile = True
+                    st.rerun()
         if st.button("🗑️ Clear all"):
-            st.session_state.via_ops=[]
+            st.session_state.via_ops={}
             st.session_state.rebuild_profile = True
             st.rerun()
     else:
