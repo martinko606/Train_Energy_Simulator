@@ -14,10 +14,12 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Physics simulation with dynamic Davis equation & vehicle max-speed cap
 • Kinematic chart with time/distance X-axis toggle, gradient ribbon & station annotations
 • Monte Carlo stochastic stop-probability analysis with progress bar
+• High-res 400 DPI Chart Exports & Bulk Zip Data Downloader
 Run:  streamlit run app.py
 """
 from __future__ import annotations
-import glob, heapq, itertools, math, os, random, tempfile, time, zipfile
+import glob, heapq, itertools, math, os, random, tempfile, time, zipfile, io
+from datetime import datetime
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 import numpy as np, pandas as pd
@@ -49,11 +51,11 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
     "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "EDITA+Btax":                  dict(traction="DIESEL",  mass=42_000,  length=30,     power=250,   aux_power=25, accel=0.4, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "Regionova (Class 814)":       dict(traction="DIESEL",  mass=39_600,  length=28.44,  power=242,   aux_power=10, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
-    "Regiospider (Class 840)":     dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=530,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=100, systems=[]),
+    "RegioNova Duo (Class 840)":   dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=514,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=100, systems=[]),
     "750-7 + 3 coaches":           dict(traction="DIESEL",  mass=207_000, length=90.16,  power=1_550, aux_power=40, accel=0.4, decel=0.8, efficiency=0.30, max_speed=100, systems=[]),
     "Regiopanter 3-car (Cl. 640)": dict(traction="ELECTRIC",mass=159_000, length=79.4,   power=2_040, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz", "25,000V/50Hz"]),
-    "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=160_000, length=79.2,   power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz"]),
-    "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=395_000, length=185.3,  power=3_920, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200, systems=["3,000V/0Hz", "25,000V/50Hz", "15,000V/16.7Hz"]),
+    "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=155_000, length=79,     power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz"]),
+    "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=380_000, length=157.9,  power=5_500, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200, systems=["3,000V/0Hz", "25,000V/50Hz", "15,000V/16.7Hz"]),
 }
 
 
@@ -655,6 +657,31 @@ class TrainSimulator:
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+def clean_name(name: str) -> str:
+    if pd.isna(name) or not name: return "Unknown"
+    return "".join([c if c.isalnum() else "_" for c in str(name)])
+
+def get_base_filename() -> str:
+    df = st.session_state.get("profile_df")
+    if df is None or df.empty:
+        return "DYPOD_Export"
+    sn = clean_name(df["station_name"].iloc[0])
+    en = clean_name(df["station_name"].iloc[-1])
+    date_str = datetime.now().strftime("%Y%m%d")
+    return f"{date_str}_{sn}_to_{en}"
+
+def get_chart_config(filename: str) -> dict:
+    return {
+        'toImageButtonOptions': {
+            'format': 'png',
+            'filename': filename,
+            'height': 900,
+            'width': 1600,
+            'scale': 4  # scale=4 multiplies resolution for ~400 DPI equivalent
+        },
+        'displayModeBar': True
+    }
+
 def fmt_dur(s: float) -> str:
     s = int(s)
     h, r = divmod(s, 3600)
@@ -1005,7 +1032,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes_grad.append(line_dict)
         shapes_energy.append(line_dict)
 
-        annot_dict = dict(x=x_pos, y=-0.25, xref="x", yref="paper",
+        annot_dict = dict(x=x_pos, y=-0.20, xref="x", yref="paper",
                           text=sname, showarrow=False, font=dict(size=10, color=color),
                           xanchor="right", yanchor="top", textangle=-45)
 
@@ -1022,13 +1049,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         fill="tozeroy", fillcolor=C["bg_blue"]))
 
     fig_speed.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=150), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_speed, annotations=annotations_speed,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=110), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Speed [km/h]", showgrid=True, gridcolor=C["light"])
     )
 
@@ -1052,7 +1079,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes=shapes_grad,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=20), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     )
 
@@ -1068,18 +1095,47 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         line=dict(color=C["secondary"], width=2.5)))
 
     fig_energy.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=150), hovermode="x unified",
+        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_energy, annotations=annotations_energy,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=110), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
     )
 
     return fig_speed, fig_grad, fig_energy
 
+def generate_zip_download() -> bytes:
+    buf = io.BytesIO()
+    bn = get_base_filename()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        # Profile Data
+        if st.session_state.profile_df is not None:
+            z.writestr(f"{bn}_TrackProfile.csv", st.session_state.profile_df.to_csv(index=False))
+
+        # Kinematics
+        rep = st.session_state.rep_result
+        if rep is not None:
+            vn = clean_name(rep.get('vehicle_name', 'Vehicle'))
+            for leg in rep.get("leg_results", []):
+                lnum = leg.get("leg_num", 1)
+                if leg.get("hist"):
+                    z.writestr(f"{bn}_{vn}_Leg{lnum}_Kinematics.csv", pd.DataFrame(leg["hist"]).to_csv(index=False))
+
+        # Monte Carlo
+        mc = st.session_state.mc_result
+        if mc is not None:
+            if isinstance(mc, pd.DataFrame):
+                z.writestr(f"{bn}_MonteCarlo_Overall.csv", mc.to_csv(index=False))
+            else:
+                if not mc.get("overall", pd.DataFrame()).empty:
+                    z.writestr(f"{bn}_MonteCarlo_Overall.csv", mc["overall"].to_csv(index=False))
+                for l in mc.get("legs", []):
+                    lnum = l.get("leg_num", "?")
+                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}.csv", l["df"].to_csv(index=False))
+    return buf.getvalue()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STREAMLIT APP
@@ -1323,6 +1379,13 @@ with st.sidebar:
     cb1, cb2 = st.columns(2)
     btn_run = cb1.button("▶️ Run",  use_container_width=True, disabled=st.session_state.profile_df is None)
     btn_mc  = cb2.button("🎲 MC",   use_container_width=True, disabled=st.session_state.profile_df is None)
+
+    st.markdown('<div class="sec">💾 Export Data</div>', unsafe_allow_html=True)
+    if st.session_state.profile_df is not None:
+        zip_data = generate_zip_download()
+        st.download_button("📦 Download All Results (ZIP)", zip_data, file_name=f"{get_base_filename()}_Results.zip", mime="application/zip", use_container_width=True)
+    else:
+        st.button("📦 Download All Results (ZIP)", disabled=True, use_container_width=True)
 
 
 # ─── Actions ─────────────────────────────────────────────────────────────────
@@ -1605,7 +1668,7 @@ with tab_prof:
 
     st.write("")
 
-    st.plotly_chart(make_profile_chart(df), use_container_width=True, key="profile_chart_tab1")
+    st.plotly_chart(make_profile_chart(df), use_container_width=True, key="profile_chart_tab1", config=get_chart_config(f"{get_base_filename()}_TrackProfile"))
 
     # Electrification legend badges
     badges = ""
@@ -1624,7 +1687,7 @@ with tab_prof:
     if not map_df.empty:
         with st.expander("🗺️ Route map", expanded=True):
             st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
-                            use_container_width=True, key="route_map_tab1")
+                            use_container_width=True, key="route_map_tab1", config=get_chart_config(f"{get_base_filename()}_RouteMap"))
 
     # Speed summary table (pure Plotly — no matplotlib)
     with st.expander("⚡ Speed & electrification summary"):
@@ -1655,7 +1718,7 @@ with tab_prof:
                         font=dict(size=11), align="left", height=24)))
         fig_tbl.update_layout(height=min(60+len(spd_df)*26,440),
                                margin=dict(l=0,r=0,t=0,b=0))
-        st.plotly_chart(fig_tbl, use_container_width=True, key="speed_table_tab1")
+        st.plotly_chart(fig_tbl, use_container_width=True, key="speed_table_tab1", config=get_chart_config(f"{get_base_filename()}_SpeedSummary"))
 
     # Full data table
     with st.expander("📋 Full profile data table"):
@@ -1757,7 +1820,7 @@ with tab_edit:
         map_df2 = df.dropna(subset=["lat","lon"])
         if not map_df2.empty:
             st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
-                            use_container_width=True, key="route_map_tab2")
+                            use_container_width=True, key="route_map_tab2", config=get_chart_config(f"{get_base_filename()}_RouteMap2"))
 
         # Override table
         st.markdown('<div class="sec">📝 Speed, Stop & Electrification Overrides</div>', unsafe_allow_html=True)
@@ -1867,6 +1930,9 @@ with tab_run_t:
             "total_possible_stops": len(rep.get("stop_names", []))
         }]
 
+    bn = get_base_filename()
+    vn = clean_name(rep.get('vehicle_name', 'Vehicle'))
+
     for leg in legs_data:
         st.markdown(f"### Leg {leg.get('leg_num', 1)}: {leg.get('start_name', '')} ➔ {leg.get('end_name', '')}")
 
@@ -1899,9 +1965,9 @@ with tab_run_t:
 
         if leg.get("hist"):
             fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], leg_snames, df_leg_ref, x_axis=x_axis_choice)
-            st.plotly_chart(fig_s, use_container_width=True, key=f"kin_s_{leg.get('leg_num', 1)}")
-            st.plotly_chart(fig_g, use_container_width=True, key=f"kin_g_{leg.get('leg_num', 1)}")
-            st.plotly_chart(fig_e, use_container_width=True, key=f"kin_e_{leg.get('leg_num', 1)}")
+            st.plotly_chart(fig_s, use_container_width=True, key=f"kin_s_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Speed"))
+            st.plotly_chart(fig_g, use_container_width=True, key=f"kin_g_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Gradient"))
+            st.plotly_chart(fig_e, use_container_width=True, key=f"kin_e_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Energy"))
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -1991,6 +2057,7 @@ with tab_mc_t:
         st.markdown("<br>", unsafe_allow_html=True)
 
         mc1, mc2 = st.columns(2)
+        bn_mc = get_base_filename()
 
         with mc1:
             fig_bar = go.Figure(go.Bar(
@@ -2009,7 +2076,7 @@ with tab_mc_t:
                 font=dict(family="Inter, sans-serif", size=12),
                 yaxis=dict(gridcolor=C["light"]),
             )
-            st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_{key_prefix}")
+            st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Savings_{key_prefix}"))
 
         with mc2:
             fig_err = go.Figure()
@@ -2041,7 +2108,7 @@ with tab_mc_t:
                 yaxis=dict(gridcolor=C["light"]),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
             )
-            st.plotly_chart(fig_err, use_container_width=True, key=f"err_{key_prefix}")
+            st.plotly_chart(fig_err, use_container_width=True, key=f"err_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Distribution_{key_prefix}"))
 
         fig_t = go.Figure()
         fig_t.add_trace(go.Scatter(
@@ -2065,7 +2132,7 @@ with tab_mc_t:
             yaxis=dict(gridcolor=C["light"]),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
-        st.plotly_chart(fig_t, use_container_width=True, key=f"time_{key_prefix}")
+        st.plotly_chart(fig_t, use_container_width=True, key=f"time_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Time_{key_prefix}"))
 
         with st.expander("📊 Energy–time trade-off"):
             fig_et = go.Figure(go.Scatter(
@@ -2090,7 +2157,7 @@ with tab_mc_t:
                 margin=dict(t=30, b=50, l=60, r=20),
                 font=dict(family="Inter, sans-serif", size=12),
             )
-            st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}")
+            st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Tradeoff_{key_prefix}"))
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
