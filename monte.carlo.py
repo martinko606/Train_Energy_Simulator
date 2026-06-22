@@ -1048,7 +1048,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes_grad.append(line_dict)
         shapes_energy.append(line_dict)
 
-        annot_dict = dict(x=x_pos, y=-0.20, xref="x", yref="paper",
+        annot_dict = dict(x=x_pos, y=-0.06, xref="x", yref="paper",
                           text=sname, showarrow=False, font=dict(size=10, color=color),
                           xanchor="right", yanchor="top", textangle=-45)
 
@@ -1065,13 +1065,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         fill="tozeroy", fillcolor=C["bg_blue"]))
 
     fig_speed.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
+        height=420, margin=dict(l=60, r=40, t=20, b=180), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_speed, annotations=annotations_speed,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Speed [km/h]", showgrid=True, gridcolor=C["light"])
     )
 
@@ -1095,7 +1095,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes=shapes_grad,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=20), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
     )
 
@@ -1111,13 +1111,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         line=dict(color=C["secondary"], width=2.5)))
 
     fig_energy.update_layout(
-        height=380, margin=dict(l=60, r=40, t=20, b=120), hovermode="x unified",
+        height=420, margin=dict(l=60, r=40, t=20, b=180), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
         shapes=shapes_energy, annotations=annotations_energy,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=x_title, range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
     )
 
