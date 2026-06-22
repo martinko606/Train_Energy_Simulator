@@ -457,6 +457,22 @@ class TrackProfile:
                 if lo <= s["km_end"] + 1e-6 and hi >= s["km_start"] - 1e-6]
         return min(lims) if lims else self.segments[-1]["v_limit"]
 
+    def get_incompatible_gap(self, km: float, comp_sys: list[str]) -> float:
+        seg = self.seg_at(km)
+        if seg.get("electrification", "NONE") in comp_sys:
+            return 0.0
+
+        idx = next((i for i, s in enumerate(self.segments) if s["km_start"] <= km <= s["km_end"] + 1e-6), -1)
+        if idx == -1: return 0.0
+
+        gap = 0.0
+        for i in range(idx, len(self.segments)):
+            s = self.segments[i]
+            if s.get("electrification", "NONE") in comp_sys:
+                break
+            gap += (s["km_end"] - s["km_start"]) * 1000.0
+        return gap
+
     @property
     def n_mandatory(self) -> int:
         return sum(1 for s in self.stations if s["type"] == "X")
@@ -1107,6 +1123,106 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
     return fig_speed, fig_grad, fig_energy
 
+def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, go.Figure, go.Figure]:
+    # 1. Bar
+    fig_bar = go.Figure(go.Bar(
+        x=mc_df["prob"], y=mc_df["savings"],
+        marker=dict(color=mc_df["savings"], colorscale="Blues",
+                    showscale=True, colorbar=dict(title=ul, len=0.8)),
+        text=mc_df["savings"].round(2),
+        texttemplate="%{text}", textposition="outside",
+        hovertemplate="<b>%{x}</b><br>Savings: %{y:.2f} " + ul + "<extra></extra>",
+    ))
+    fig_bar.update_layout(
+        xaxis_title="Request-stop probability",
+        yaxis_title=f"Savings [{ul}]",
+        height=400, paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(t=30, b=50, l=60, r=20),
+        font=dict(family="Inter, sans-serif", size=12),
+        yaxis=dict(gridcolor=C["light"]),
+    )
+
+    # 2. Error
+    fig_err = go.Figure()
+    fig_err.add_trace(go.Scatter(
+        x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
+        y=list(mc_df["max_e"]) + list(mc_df["min_e"].iloc[::-1]),
+        fill="toself", fillcolor=C["bg_blue"],
+        line=dict(color="rgba(255,255,255,0)"), name="Min–Max range",
+    ))
+    fig_err.add_trace(go.Scatter(
+        x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
+        y=list(mc_df["mean_e"] + mc_df["std_e"]) +
+          list((mc_df["mean_e"] - mc_df["std_e"]).iloc[::-1]),
+        fill="toself", fillcolor="rgba(37,99,235,0.18)",
+        line=dict(color="rgba(255,255,255,0)"), name="Mean ± 1σ",
+    ))
+    fig_err.add_trace(go.Scatter(
+        x=mc_df["prob"], y=mc_df["mean_e"],
+        mode="markers+lines",
+        marker=dict(size=11, color=C["primary"], line=dict(color="white", width=2)),
+        line=dict(color=C["primary"], width=2.5), name="Mean",
+    ))
+    fig_err.update_layout(
+        xaxis_title="Request-stop probability",
+        yaxis_title=f"Energy [{ul}]",
+        height=400, paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(t=30, b=50, l=60, r=20),
+        font=dict(family="Inter, sans-serif", size=12),
+        yaxis=dict(gridcolor=C["light"]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+
+    # 3. Time
+    fig_t = go.Figure()
+    fig_t.add_trace(go.Scatter(
+        x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
+        y=list(mc_df["max_t"] / 60) + list(mc_df["min_t"].iloc[::-1] / 60),
+        fill="toself", fillcolor=C["bg_orange"],
+        line=dict(color="rgba(255,255,255,0)"), name="Min–Max range",
+    ))
+    fig_t.add_trace(go.Scatter(
+        x=mc_df["prob"], y=mc_df["mean_t"] / 60,
+        mode="markers+lines",
+        marker=dict(size=11, color=C["accent"], line=dict(color="white", width=2)),
+        line=dict(color=C["accent"], width=2.5), name="Mean time",
+    ))
+    fig_t.update_layout(
+        xaxis_title="Request-stop probability",
+        yaxis_title="Journey time [min]",
+        height=360, paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(t=30, b=50, l=60, r=20),
+        font=dict(family="Inter, sans-serif", size=12),
+        yaxis=dict(gridcolor=C["light"]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+
+    # 4. Tradeoff
+    fig_et = go.Figure(go.Scatter(
+        x=mc_df["mean_t"] / 60, y=mc_df["mean_e"],
+        mode="markers+text",
+        marker=dict(
+            size=mc_df["savings"].clip(lower=0) * 3 + 14,
+            color=mc_df["savings"], colorscale="RdYlGn", showscale=True,
+            colorbar=dict(title=f"Savings [{ul}]"),
+            line=dict(color="white", width=1.5),
+        ),
+        text=mc_df["prob"], textposition="top center",
+        hovertemplate=(
+            "<b>%{text}</b><br>Time: %{x:.1f} min<br>"
+            "Energy: %{y:.2f} " + ul + "<extra></extra>"
+        ),
+    ))
+    fig_et.update_layout(
+        xaxis_title="Mean journey time [min]",
+        yaxis_title=f"Mean energy [{ul}]",
+        height=420, paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(t=30, b=50, l=60, r=20),
+        font=dict(family="Inter, sans-serif", size=12),
+    )
+
+    return fig_bar, fig_err, fig_t, fig_et
+
 def generate_zip_download() -> bytes:
     buf = io.BytesIO()
     bn = get_base_filename()
@@ -1119,22 +1235,148 @@ def generate_zip_download() -> bytes:
         rep = st.session_state.rep_result
         if rep is not None:
             vn = clean_name(rep.get('vehicle_name', 'Vehicle'))
-            for leg in rep.get("leg_results", []):
+            tr = rep.get('traction', 'ELECTRIC')
+            dd = rep.get('diesel_d', 10.0)
+            eff = rep.get('efficiency', 0.85)
+            ul = rep.get('unit_lbl', 'kWh')
+
+            # Overall Stats
+            t_stats = rep.get("total_stats", rep.get("stats", {}))
+            t_net_w = rep.get("total_net_worst", t_stats.get("net_kwh", 0.0))
+
+            cons = to_unit(t_stats, tr, dd, eff)
+            cons_w = to_unit({"net_kwh": t_net_w}, tr, dd, eff)
+            saved = cons_w - cons
+            legs_data = rep.get("leg_results", [])
+
+            total_stops = sum(len(l.get("snames", [])) for l in legs_data)
+            if not legs_data and "stop_names" in rep:
+                total_stops = len(rep["stop_names"])
+
+            overall_txt = (
+                f"Overall Scenario Statistics\n"
+                f"Vehicle: {rep.get('vehicle_name', 'Unknown')}\n"
+                f"Total Journey Time: {fmt_dur(t_stats.get('journey_time_s', 0))}\n"
+                f"Total Consumed [{ul}]: {cons:.1f}\n"
+                f"Total Saved vs All Stops [{ul}]: {saved:.1f}\n"
+                f"Total Recuperated [kWh]: {t_stats.get('regen_kwh', 0):.1f}\n"
+                f"Total Stops Served: {total_stops}\n"
+            )
+            z.writestr(f"{bn}_{vn}_Kinematics_Overall_Summary.txt", overall_txt)
+
+            # Fix for legacy cached single-runs
+            if not legs_data and "hist" in rep:
+                df_p = st.session_state.profile_df
+                legs_data = [{
+                    "leg_num": 1,
+                    "start_name": df_p["station_name"].iloc[0] if df_p is not None and not df_p.empty else "",
+                    "end_name": df_p["station_name"].iloc[-1] if df_p is not None and not df_p.empty else "",
+                    "df_leg": df_p,
+                    "hist": rep.get("hist"),
+                    "stats": rep.get("stats", {}),
+                    "stats_worst": rep.get("stats_worst", rep.get("stats", {})),
+                    "snames": rep.get("stop_names", []),
+                    "total_possible_stops": len(rep.get("stop_names", []))
+                }]
+
+            for leg in legs_data:
                 lnum = leg.get("leg_num", 1)
+                sname = leg.get('start_name', '')
+                ename = leg.get('end_name', '')
+                lsnames = leg.get("snames", [])
+                tot_poss = leg.get("total_possible_stops", len(lsnames))
+
+                lstats = leg.get("stats", {})
+                lworst = leg.get("stats_worst", lstats)
+                lcons = to_unit(lstats, tr, dd, eff)
+                lcons_w = to_unit(lworst, tr, dd, eff)
+                lsaved = lcons_w - lcons
+                df_leg = leg.get("df_leg", pd.DataFrame())
+                ldist = df_leg["cum_km"].max() if not df_leg.empty else 0.0
+                ltime = lstats.get("journey_time_s", 0)
+                lavg = ldist / (ltime/3600) if ltime > 0 else 0
+
+                spec_val = f"{lcons/ldist*1000:.1f} mL/km" if tr == "DIESEL" else f"{lstats.get('net_kwh',0)/ldist:.3f} kWh/km"
+
+                leg_txt = (
+                    f"Leg {lnum}: {sname} -> {ename}\n"
+                    f"Stops Served: {len(lsnames)} / {tot_poss} ({', '.join(lsnames) if lsnames else 'None'})\n"
+                    f"Time: {fmt_dur(ltime)}\n"
+                    f"Consumed [{ul}]: {lcons:.1f}\n"
+                    f"Saved vs All Stops [{ul}]: {lsaved:.1f}\n"
+                    f"Avg Speed: {lavg:.1f} km/h\n"
+                    f"Specific Energy: {spec_val if ldist>0 else '0.0'}\n"
+                )
+                z.writestr(f"{bn}_{vn}_Leg{lnum}_Summary.txt", leg_txt)
+
                 if leg.get("hist"):
                     z.writestr(f"{bn}_{vn}_Leg{lnum}_Kinematics.csv", pd.DataFrame(leg["hist"]).to_csv(index=False))
+                    # Render HTML/PNG figures
+                    fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], lsnames, df_leg, "Distance (km)")
+
+                    try:
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.png", fig_s.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.png", fig_g.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.png", fig_e.to_image(format="png", scale=4, width=1600, height=900))
+                    except ValueError:
+                        # Kaleido not installed, fallback to interactive HTML
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.html", fig_s.to_html(include_plotlyjs='cdn'))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn'))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn'))
 
         # Monte Carlo
         mc = st.session_state.mc_result
         if mc is not None:
             if isinstance(mc, pd.DataFrame):
-                z.writestr(f"{bn}_MonteCarlo_Overall.csv", mc.to_csv(index=False))
+                mc_overall = mc
+                mc_legs = []
             else:
-                if not mc.get("overall", pd.DataFrame()).empty:
-                    z.writestr(f"{bn}_MonteCarlo_Overall.csv", mc["overall"].to_csv(index=False))
-                for l in mc.get("legs", []):
-                    lnum = l.get("leg_num", "?")
-                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}.csv", l["df"].to_csv(index=False))
+                mc_overall = mc.get("overall", pd.DataFrame())
+                mc_legs = mc.get("legs", [])
+
+            if not mc_overall.empty:
+                ul = mc_overall["unit"].iloc[0] if "unit" in mc_overall else "kWh"
+                z.writestr(f"{bn}_MonteCarlo_Overall.csv", mc_overall.to_csv(index=False))
+
+                mc_txt = f"Monte Carlo Overall Summary\nRuns per Probability: {len(mc_overall)}\nNote: Detailed stats in CSV."
+                z.writestr(f"{bn}_MonteCarlo_Overall_Summary.txt", mc_txt)
+
+                fig_bar, fig_err, fig_t, fig_et = make_mc_charts(mc_overall, ul)
+                try:
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.png", fig_bar.to_image(format="png", scale=4, width=1600, height=900))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.png", fig_err.to_image(format="png", scale=4, width=1600, height=900))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.png", fig_t.to_image(format="png", scale=4, width=1600, height=900))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.png", fig_et.to_image(format="png", scale=4, width=1600, height=900))
+                except ValueError:
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.html", fig_bar.to_html(include_plotlyjs='cdn'))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.html", fig_err.to_html(include_plotlyjs='cdn'))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.html", fig_t.to_html(include_plotlyjs='cdn'))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn'))
+
+            for l in mc_legs:
+                lnum = l.get("leg_num", "?")
+                ldf = l["df"]
+                sname = l.get("start_name", "")
+                ename = l.get("end_name", "")
+
+                z.writestr(f"{bn}_MonteCarlo_Leg{lnum}.csv", ldf.to_csv(index=False))
+                l_txt = f"Monte Carlo Leg {lnum}: {sname} -> {ename}\nDetailed stats in CSV."
+                z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Summary.txt", l_txt)
+
+                if not ldf.empty:
+                    ul = ldf["unit"].iloc[0] if "unit" in ldf else "kWh"
+                    fig_bar, fig_err, fig_t, fig_et = make_mc_charts(ldf, ul)
+                    try:
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.png", fig_bar.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.png", fig_err.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.png", fig_t.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.png", fig_et.to_image(format="png", scale=4, width=1600, height=900))
+                    except ValueError:
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.html", fig_bar.to_html(include_plotlyjs='cdn'))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html", fig_err.to_html(include_plotlyjs='cdn'))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn'))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn'))
+
     return buf.getvalue()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2056,107 +2298,20 @@ with tab_mc_t:
                            key=f"dl_mc_{key_prefix}")
         st.markdown("<br>", unsafe_allow_html=True)
 
+        fig_bar, fig_err, fig_t, fig_et = make_mc_charts(mc_df, ul)
+
         mc1, mc2 = st.columns(2)
         bn_mc = get_base_filename()
 
         with mc1:
-            fig_bar = go.Figure(go.Bar(
-                x=mc_df["prob"], y=mc_df["savings"],
-                marker=dict(color=mc_df["savings"], colorscale="Blues",
-                            showscale=True, colorbar=dict(title=ul, len=0.8)),
-                text=mc_df["savings"].round(2),
-                texttemplate="%{text}", textposition="outside",
-                hovertemplate="<b>%{x}</b><br>Savings: %{y:.2f} " + ul + "<extra></extra>",
-            ))
-            fig_bar.update_layout(
-                xaxis_title="Request-stop probability",
-                yaxis_title=f"Savings [{ul}]",
-                height=400, paper_bgcolor="white", plot_bgcolor="white",
-                margin=dict(t=30, b=50, l=60, r=20),
-                font=dict(family="Inter, sans-serif", size=12),
-                yaxis=dict(gridcolor=C["light"]),
-            )
             st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Savings_{key_prefix}"))
 
         with mc2:
-            fig_err = go.Figure()
-            fig_err.add_trace(go.Scatter(
-                x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
-                y=list(mc_df["max_e"]) + list(mc_df["min_e"].iloc[::-1]),
-                fill="toself", fillcolor=C["bg_blue"],
-                line=dict(color="rgba(255,255,255,0)"), name="Min–Max range",
-            ))
-            fig_err.add_trace(go.Scatter(
-                x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
-                y=list(mc_df["mean_e"] + mc_df["std_e"]) +
-                  list((mc_df["mean_e"] - mc_df["std_e"]).iloc[::-1]),
-                fill="toself", fillcolor="rgba(37,99,235,0.18)",
-                line=dict(color="rgba(255,255,255,0)"), name="Mean ± 1σ",
-            ))
-            fig_err.add_trace(go.Scatter(
-                x=mc_df["prob"], y=mc_df["mean_e"],
-                mode="markers+lines",
-                marker=dict(size=11, color=C["primary"], line=dict(color="white", width=2)),
-                line=dict(color=C["primary"], width=2.5), name="Mean",
-            ))
-            fig_err.update_layout(
-                xaxis_title="Request-stop probability",
-                yaxis_title=f"Energy [{ul}]",
-                height=400, paper_bgcolor="white", plot_bgcolor="white",
-                margin=dict(t=30, b=50, l=60, r=20),
-                font=dict(family="Inter, sans-serif", size=12),
-                yaxis=dict(gridcolor=C["light"]),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            )
             st.plotly_chart(fig_err, use_container_width=True, key=f"err_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Distribution_{key_prefix}"))
 
-        fig_t = go.Figure()
-        fig_t.add_trace(go.Scatter(
-            x=list(mc_df["prob"]) + list(mc_df["prob"].iloc[::-1]),
-            y=list(mc_df["max_t"] / 60) + list(mc_df["min_t"].iloc[::-1] / 60),
-            fill="toself", fillcolor=C["bg_orange"],
-            line=dict(color="rgba(255,255,255,0)"), name="Min–Max range",
-        ))
-        fig_t.add_trace(go.Scatter(
-            x=mc_df["prob"], y=mc_df["mean_t"] / 60,
-            mode="markers+lines",
-            marker=dict(size=11, color=C["accent"], line=dict(color="white", width=2)),
-            line=dict(color=C["accent"], width=2.5), name="Mean time",
-        ))
-        fig_t.update_layout(
-            xaxis_title="Request-stop probability",
-            yaxis_title="Journey time [min]",
-            height=360, paper_bgcolor="white", plot_bgcolor="white",
-            margin=dict(t=30, b=50, l=60, r=20),
-            font=dict(family="Inter, sans-serif", size=12),
-            yaxis=dict(gridcolor=C["light"]),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        )
         st.plotly_chart(fig_t, use_container_width=True, key=f"time_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Time_{key_prefix}"))
 
         with st.expander("📊 Energy–time trade-off"):
-            fig_et = go.Figure(go.Scatter(
-                x=mc_df["mean_t"] / 60, y=mc_df["mean_e"],
-                mode="markers+text",
-                marker=dict(
-                    size=mc_df["savings"].clip(lower=0) * 3 + 14,
-                    color=mc_df["savings"], colorscale="RdYlGn", showscale=True,
-                    colorbar=dict(title=f"Savings [{ul}]"),
-                    line=dict(color="white", width=1.5),
-                ),
-                text=mc_df["prob"], textposition="top center",
-                hovertemplate=(
-                    "<b>%{text}</b><br>Time: %{x:.1f} min<br>"
-                    "Energy: %{y:.2f} " + ul + "<extra></extra>"
-                ),
-            ))
-            fig_et.update_layout(
-                xaxis_title="Mean journey time [min]",
-                yaxis_title=f"Mean energy [{ul}]",
-                height=420, paper_bgcolor="white", plot_bgcolor="white",
-                margin=dict(t=30, b=50, l=60, r=20),
-                font=dict(family="Inter, sans-serif", size=12),
-            )
             st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Tradeoff_{key_prefix}"))
 
         st.markdown("<hr>", unsafe_allow_html=True)
