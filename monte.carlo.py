@@ -1055,14 +1055,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         annotations_speed.append(annot_dict)
         annotations_energy.append(annot_dict)
 
-
-    # 1. SPEED CHART
+        # 1. SPEED CHART
     fig_speed = go.Figure()
     fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
-        line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")))
+                                   line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")))
     fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_kmh"], name="Actual Speed",
-        line=dict(color=C["primary"], width=2.5),
-        fill="tozeroy", fillcolor=C["bg_blue"]))
+                                   line=dict(color=C["primary"], width=2.5),
+                                   fill="tozeroy", fillcolor=C["bg_blue"]))
 
     fig_speed.update_layout(
         height=420, margin=dict(l=60, r=40, t=20, b=180), hovermode="x unified",
@@ -1071,44 +1070,37 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes=shapes_speed, annotations=annotations_speed,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True,
+                   gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Speed [km/h]", showgrid=True, gridcolor=C["light"])
     )
-
 
     # 2. GRADIENT CHART
     fig_grad = go.Figure()
     if "grad" in hist:
         g_arr = np.array(hist["grad"])
-        pos_g = np.clip(g_arr, 0, None)
-        neg_g = np.clip(g_arr, None, 0)
-
-        fig_grad.add_trace(go.Scatter(x=x_data, y=pos_g, name="Uphill",
-            line=dict(color=C["red"], width=0, shape="hv"),
-            fill="tozeroy", fillcolor="rgba(220,38,38,0.55)", showlegend=False))
+        # ... existing code ...
         fig_grad.add_trace(go.Scatter(x=x_data, y=neg_g, name="Downhill",
-            line=dict(color=C["primary"], width=0, shape="hv"),
-            fill="tozeroy", fillcolor="rgba(37,99,235,0.55)", showlegend=False))
+                                      line=dict(color=C["primary"], width=0, shape="hv"),
+                                      fill="tozeroy", fillcolor="rgba(37,99,235,0.55)", showlegend=False))
 
     fig_grad.update_layout(
         height=250, margin=dict(l=60, r=40, t=20, b=60), hovermode="x unified",
         shapes=shapes_grad,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=20), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
-        yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
+        xaxis=dict(title=dict(text=x_title, standoff=20), range=[x_min, x_max], tickformat=x_fmt, showgrid=True,
+                   gridcolor=C["light"], showticklabels=True),
+        yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True,
+                   zerolinecolor="#CBD5E1")
     )
-
 
     # 3. ENERGY CHART
     fig_energy = go.Figure()
     fig_energy.add_trace(go.Scatter(x=x_data, y=hist["gross_kwh"], name="Gross Energy",
-        line=dict(color=C["yellow"], width=2),
-        fill="tozeroy", fillcolor="rgba(202,138,4,0.15)")) # Light overlay for gross energy
-    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["regen_kwh"], name="Recuperated",
-        line=dict(color=C["green"], width=2, dash="dash")))
-    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
-        line=dict(color=C["secondary"], width=2.5)))
+                                    # ... existing code ...
+                                    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
+                                                                    line=dict(color=C["secondary"], width=2.5)))
 
     fig_energy.update_layout(
         height=420, margin=dict(l=60, r=40, t=20, b=180), hovermode="x unified",
@@ -1117,11 +1109,13 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         shapes=shapes_energy, annotations=annotations_energy,
         paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, gridcolor=C["light"], showticklabels=True),
+        xaxis=dict(title=dict(text=x_title, standoff=140), range=[x_min, x_max], tickformat=x_fmt, showgrid=True,
+                   gridcolor=C["light"], showticklabels=True),
         yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
     )
 
     return fig_speed, fig_grad, fig_energy
+
 
 def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, go.Figure, go.Figure]:
     # 1. Bar
@@ -1209,8 +1203,8 @@ def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, 
         ),
         text=mc_df["prob"], textposition="top center",
         hovertemplate=(
-            "<b>%{text}</b><br>Time: %{x:.1f} min<br>"
-            "Energy: %{y:.2f} " + ul + "<extra></extra>"
+                "<b>%{text}</b><br>Time: %{x:.1f} min<br>"
+                "Energy: %{y:.2f} " + ul + "<extra></extra>"
         ),
     ))
     fig_et.update_layout(
@@ -1223,15 +1217,25 @@ def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, 
 
     return fig_bar, fig_err, fig_t, fig_et
 
+
 def generate_zip_download() -> bytes:
     buf = io.BytesIO()
     bn = get_base_filename()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        # Profile Data
+
+        # 0. Inputs / Configuration
+        inputs = st.session_state.get("sim_inputs", {})
+        if inputs:
+            inputs_txt = "DYPOD SIMULATION INPUTS & CONFIGURATION\n" + "=" * 50 + "\n\n"
+            for k, v in inputs.items():
+                inputs_txt += f"{k:<35}: {v}\n"
+            z.writestr(f"{bn}_Simulation_Inputs.txt", inputs_txt)
+
+        # 1. Profile Data
         if st.session_state.profile_df is not None:
             z.writestr(f"{bn}_TrackProfile.csv", st.session_state.profile_df.to_csv(index=False))
 
-        # Kinematics
+        # 2. Kinematics
         rep = st.session_state.rep_result
         if rep is not None:
             vn = clean_name(rep.get('vehicle_name', 'Vehicle'))
@@ -1294,9 +1298,9 @@ def generate_zip_download() -> bytes:
                 df_leg = leg.get("df_leg", pd.DataFrame())
                 ldist = df_leg["cum_km"].max() if not df_leg.empty else 0.0
                 ltime = lstats.get("journey_time_s", 0)
-                lavg = ldist / (ltime/3600) if ltime > 0 else 0
+                lavg = ldist / (ltime / 3600) if ltime > 0 else 0
 
-                spec_val = f"{lcons/ldist*1000:.1f} mL/km" if tr == "DIESEL" else f"{lstats.get('net_kwh',0)/ldist:.3f} kWh/km"
+                spec_val = f"{lcons / ldist * 1000:.1f} mL/km" if tr == "DIESEL" else f"{lstats.get('net_kwh', 0) / ldist:.3f} kWh/km"
 
                 leg_txt = (
                     f"Leg {lnum}: {sname} -> {ename}\n"
@@ -1305,26 +1309,30 @@ def generate_zip_download() -> bytes:
                     f"Consumed [{ul}]: {lcons:.1f}\n"
                     f"Saved vs All Stops [{ul}]: {lsaved:.1f}\n"
                     f"Avg Speed: {lavg:.1f} km/h\n"
-                    f"Specific Energy: {spec_val if ldist>0 else '0.0'}\n"
+                    f"Specific Energy: {spec_val if ldist > 0 else '0.0'}\n"
                 )
                 z.writestr(f"{bn}_{vn}_Leg{lnum}_Summary.txt", leg_txt)
 
                 if leg.get("hist"):
                     z.writestr(f"{bn}_{vn}_Leg{lnum}_Kinematics.csv", pd.DataFrame(leg["hist"]).to_csv(index=False))
                     # Render HTML/PNG figures
-                    fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], lsnames, df_leg, "Distance (km)")
+                    x_axis = st.session_state.get("x_axis_choice", "Distance (km)")
+                    fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], lsnames, df_leg, x_axis)
 
                     try:
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.png", fig_s.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.png", fig_g.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.png", fig_e.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.png",
+                                   fig_s.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.png",
+                                   fig_g.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.png",
+                                   fig_e.to_image(format="png", scale=4, width=1600, height=900))
                     except ValueError:
                         # Kaleido not installed, fallback to interactive HTML
                         z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.html", fig_s.to_html(include_plotlyjs='cdn'))
                         z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn'))
                         z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn'))
 
-        # Monte Carlo
+        # 3. Monte Carlo
         mc = st.session_state.mc_result
         if mc is not None:
             if isinstance(mc, pd.DataFrame):
@@ -1335,18 +1343,28 @@ def generate_zip_download() -> bytes:
                 mc_legs = mc.get("legs", [])
 
             if not mc_overall.empty:
-                ul = mc_overall["unit"].iloc[0] if "unit" in mc_overall else "kWh"
+                ul = mc_overall["unit"].iloc[0] if "unit" in mc_overall.columns else "kWh"
                 z.writestr(f"{bn}_MonteCarlo_Overall.csv", mc_overall.to_csv(index=False))
 
-                mc_txt = f"Monte Carlo Overall Summary\nRuns per Probability: {len(mc_overall)}\nNote: Detailed stats in CSV."
+                mc_txt = (
+                    f"Monte Carlo Overall Summary\n"
+                    f"{'=' * 30}\n"
+                    f"Runs per Probability: {inputs.get('Monte Carlo Runs per Prob', 'N/A')}\n"
+                    f"Probabilities Swept: {inputs.get('Monte Carlo Probabilities Swept', 'N/A')}\n\n"
+                    f"See CSV file for full distribution data."
+                )
                 z.writestr(f"{bn}_MonteCarlo_Overall_Summary.txt", mc_txt)
 
                 fig_bar, fig_err, fig_t, fig_et = make_mc_charts(mc_overall, ul)
                 try:
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.png", fig_bar.to_image(format="png", scale=4, width=1600, height=900))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.png", fig_err.to_image(format="png", scale=4, width=1600, height=900))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.png", fig_t.to_image(format="png", scale=4, width=1600, height=900))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.png", fig_et.to_image(format="png", scale=4, width=1600, height=900))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.png",
+                               fig_bar.to_image(format="png", scale=4, width=1600, height=900))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.png",
+                               fig_err.to_image(format="png", scale=4, width=1600, height=900))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.png",
+                               fig_t.to_image(format="png", scale=4, width=1600, height=900))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.png",
+                               fig_et.to_image(format="png", scale=4, width=1600, height=900))
                 except ValueError:
                     z.writestr(f"{bn}_MonteCarlo_Overall_Savings.html", fig_bar.to_html(include_plotlyjs='cdn'))
                     z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.html", fig_err.to_html(include_plotlyjs='cdn'))
@@ -1359,25 +1377,40 @@ def generate_zip_download() -> bytes:
                 sname = l.get("start_name", "")
                 ename = l.get("end_name", "")
 
-                z.writestr(f"{bn}_MonteCarlo_Leg{lnum}.csv", ldf.to_csv(index=False))
-                l_txt = f"Monte Carlo Leg {lnum}: {sname} -> {ename}\nDetailed stats in CSV."
-                z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Summary.txt", l_txt)
-
                 if not ldf.empty:
-                    ul = ldf["unit"].iloc[0] if "unit" in ldf else "kWh"
+                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}.csv", ldf.to_csv(index=False))
+                    l_txt = (
+                        f"Monte Carlo Leg {lnum}: {sname} -> {ename}\n"
+                        f"{'=' * 30}\n"
+                        f"Runs per Probability: {inputs.get('Monte Carlo Runs per Prob', 'N/A')}\n"
+                        f"Probabilities Swept: {inputs.get('Monte Carlo Probabilities Swept', 'N/A')}\n\n"
+                        f"See CSV file for full distribution data."
+                    )
+                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Summary.txt", l_txt)
+
+                    ul = ldf["unit"].iloc[0] if "unit" in ldf.columns else "kWh"
                     fig_bar, fig_err, fig_t, fig_et = make_mc_charts(ldf, ul)
                     try:
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.png", fig_bar.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.png", fig_err.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.png", fig_t.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.png", fig_et.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.png",
+                                   fig_bar.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.png",
+                                   fig_err.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.png",
+                                   fig_t.to_image(format="png", scale=4, width=1600, height=900))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.png",
+                                   fig_et.to_image(format="png", scale=4, width=1600, height=900))
                     except ValueError:
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.html", fig_bar.to_html(include_plotlyjs='cdn'))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html", fig_err.to_html(include_plotlyjs='cdn'))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html",
+                                   fig_err.to_html(include_plotlyjs='cdn'))
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn'))
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn'))
 
     return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STREAMLIT APP
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STREAMLIT APP
