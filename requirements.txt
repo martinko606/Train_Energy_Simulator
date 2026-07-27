@@ -2,8 +2,8 @@
 # Install: pip install -r requirements.txt
 # Python:  3.10 / 3.11 / 3.12
 
-numpy>=1.26,<3
-pandas>=2.1,<4
-plotly>=5.18
-streamlit>=1.35
-openpyxl>=3.1        # optional: only needed if you also load .xlsx track files
+pandas
+numpy
+plotly
+streamlit
+kaleido==0.2.1

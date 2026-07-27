@@ -1046,8 +1046,8 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
         shapes_speed.append(line_dict)
         shapes_grad.append(line_dict)
-
         shapes_energy.append(line_dict)
+
         annot_dict = dict(x=x_pos, y=-0.06, xref="x", yref="paper",
                           text=sname, showarrow=False, font=dict(size=10, color=color),
                           xanchor="right", yanchor="top", textangle=-45)
@@ -1104,7 +1104,8 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
     fig_energy = go.Figure()
     fig_energy.add_trace(go.Scatter(x=x_data, y=hist["gross_kwh"], name="Gross Energy",
                                     line=dict(color=C["yellow"], width=2),
-                                    fill="tozeroy", fillcolor="rgba(202,138,4,0.15)"))  # Light overlay for gross energy
+                                    fill="tozeroy",
+                                    fillcolor="rgba(202,138,4,0.15)"))  # Light overlay for gross energy
     fig_energy.add_trace(go.Scatter(x=x_data, y=hist["regen_kwh"], name="Recuperated",
                                     line=dict(color=C["green"], width=2, dash="dash")))
     fig_energy.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
@@ -1336,9 +1337,12 @@ def generate_zip_download() -> bytes:
                                    fig_e.to_image(format="png", scale=4, width=1600, height=900))
                     except ValueError:
                         # Kaleido not installed, fallback to interactive HTML
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.html", fig_s.to_html(include_plotlyjs='cdn'))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn'))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn'))
+                        cfg_s = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Speed")
+                        cfg_g = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Gradient")
+                        cfg_e = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Energy")
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.html", fig_s.to_html(include_plotlyjs='cdn', config=cfg_s))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn', config=cfg_g))
+                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn', config=cfg_e))
 
         # 3. Monte Carlo
         mc = st.session_state.mc_result
@@ -1374,10 +1378,15 @@ def generate_zip_download() -> bytes:
                     z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.png",
                                fig_et.to_image(format="png", scale=4, width=1600, height=900))
                 except ValueError:
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.html", fig_bar.to_html(include_plotlyjs='cdn'))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.html", fig_err.to_html(include_plotlyjs='cdn'))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.html", fig_t.to_html(include_plotlyjs='cdn'))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn'))
+                    cfg_b = get_chart_config(f"{bn}_MonteCarlo_Overall_Savings")
+                    cfg_er = get_chart_config(f"{bn}_MonteCarlo_Overall_Distribution")
+                    cfg_t = get_chart_config(f"{bn}_MonteCarlo_Overall_Time")
+                    cfg_et = get_chart_config(f"{bn}_MonteCarlo_Overall_Tradeoff")
+
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.html", fig_bar.to_html(include_plotlyjs='cdn', config=cfg_b))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.html", fig_err.to_html(include_plotlyjs='cdn', config=cfg_er))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
+                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
 
             for l in mc_legs:
                 lnum = l.get("leg_num", "?")
@@ -1408,13 +1417,18 @@ def generate_zip_download() -> bytes:
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.png",
                                    fig_et.to_image(format="png", scale=4, width=1600, height=900))
                     except ValueError:
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.html", fig_bar.to_html(include_plotlyjs='cdn'))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html",
-                                   fig_err.to_html(include_plotlyjs='cdn'))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn'))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn'))
+                        cfg_b = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Savings")
+                        cfg_er = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Distribution")
+                        cfg_t = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Time")
+                        cfg_et = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff")
+
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.html", fig_bar.to_html(include_plotlyjs='cdn', config=cfg_b))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html", fig_err.to_html(include_plotlyjs='cdn', config=cfg_er))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
+                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
 
     return buf.getvalue()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STREAMLIT APP
@@ -1652,8 +1666,30 @@ with st.sidebar:
     mc_n     = st.number_input("Runs per probability", 20, 500, 100, 10)
     mc_probs = st.multiselect("Probabilities to sweep", options=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0], default=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
 
+    st.session_state.sim_inputs = {
+        "Routing Mode": scenario_mode,
+        "Vehicle Preset": veh,
+        "Traction": traction,
+        "Mass (kg)": mass,
+        "Length (m)": length,
+        "Power (kW)": power,
+        "Aux Power (kW)": aux_power,
+        "Max Speed (km/h)": max_speed,
+        "Acceleration (m/s²)": accel,
+        "Deceleration (m/s²)": decel,
+        "Efficiency (%)": efficiency * 100,
+        "Recuperation Efficiency (%)": regen_efficiency * 100 if traction == "ELECTRIC" else 0,
+        "Station Dwell (s)": dwell,
+        "Stop Mode": stop_mode,
+        "Request-stop Probability": stop_prob,
+        "Electric Coasting Limit (m)": coast_threshold_m,
+        "Monte Carlo Runs per Prob": mc_n,
+        "Monte Carlo Probabilities Swept": ", ".join(f"{p}" for p in mc_probs)
+    }
+
     st.markdown('<div class="sec">📊 Display Options</div>', unsafe_allow_html=True)
     x_axis_choice = st.radio("Kinematic X-axis", ["Distance (km)", "Time (MM:SS)"])
+    st.session_state.x_axis_choice = x_axis_choice
 
     cb1, cb2 = st.columns(2)
     btn_run = cb1.button("▶️ Run",  use_container_width=True, disabled=st.session_state.profile_df is None)
