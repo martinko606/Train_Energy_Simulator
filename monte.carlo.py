@@ -1328,6 +1328,15 @@ def generate_zip_download() -> bytes:
                     x_axis = st.session_state.get("x_axis_choice", "Distance (km)")
                     fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], lsnames, df_leg, x_axis)
 
+                    # 1. Always export interactive HTML for post-processing
+                    cfg_s = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Speed")
+                    cfg_g = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Gradient")
+                    cfg_e = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Energy")
+                    z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.html", fig_s.to_html(include_plotlyjs='cdn', config=cfg_s))
+                    z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn', config=cfg_g))
+                    z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn', config=cfg_e))
+
+                    # 2. Attempt to export High-Res PNGs
                     try:
                         z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.png",
                                    fig_s.to_image(format="png", scale=4, width=1600, height=900))
@@ -1336,13 +1345,7 @@ def generate_zip_download() -> bytes:
                         z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.png",
                                    fig_e.to_image(format="png", scale=4, width=1600, height=900))
                     except ValueError:
-                        # Kaleido not installed, fallback to interactive HTML
-                        cfg_s = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Speed")
-                        cfg_g = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Gradient")
-                        cfg_e = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Energy")
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.html", fig_s.to_html(include_plotlyjs='cdn', config=cfg_s))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn', config=cfg_g))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn', config=cfg_e))
+                        pass # Kaleido missing, silently skip PNGs since HTML is already saved
 
         # 3. Monte Carlo
         mc = st.session_state.mc_result
@@ -1368,6 +1371,18 @@ def generate_zip_download() -> bytes:
                 z.writestr(f"{bn}_MonteCarlo_Overall_Summary.txt", mc_txt)
 
                 fig_bar, fig_err, fig_t, fig_et = make_mc_charts(mc_overall, ul)
+
+                # Always export interactive HTML
+                cfg_b = get_chart_config(f"{bn}_MonteCarlo_Overall_Savings")
+                cfg_er = get_chart_config(f"{bn}_MonteCarlo_Overall_Distribution")
+                cfg_t = get_chart_config(f"{bn}_MonteCarlo_Overall_Time")
+                cfg_et = get_chart_config(f"{bn}_MonteCarlo_Overall_Tradeoff")
+
+                z.writestr(f"{bn}_MonteCarlo_Overall_Savings.html", fig_bar.to_html(include_plotlyjs='cdn', config=cfg_b))
+                z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.html", fig_err.to_html(include_plotlyjs='cdn', config=cfg_er))
+                z.writestr(f"{bn}_MonteCarlo_Overall_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
+                z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
+
                 try:
                     z.writestr(f"{bn}_MonteCarlo_Overall_Savings.png",
                                fig_bar.to_image(format="png", scale=4, width=1600, height=900))
@@ -1378,15 +1393,7 @@ def generate_zip_download() -> bytes:
                     z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.png",
                                fig_et.to_image(format="png", scale=4, width=1600, height=900))
                 except ValueError:
-                    cfg_b = get_chart_config(f"{bn}_MonteCarlo_Overall_Savings")
-                    cfg_er = get_chart_config(f"{bn}_MonteCarlo_Overall_Distribution")
-                    cfg_t = get_chart_config(f"{bn}_MonteCarlo_Overall_Time")
-                    cfg_et = get_chart_config(f"{bn}_MonteCarlo_Overall_Tradeoff")
-
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.html", fig_bar.to_html(include_plotlyjs='cdn', config=cfg_b))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.html", fig_err.to_html(include_plotlyjs='cdn', config=cfg_er))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
+                    pass
 
             for l in mc_legs:
                 lnum = l.get("leg_num", "?")
@@ -1407,6 +1414,18 @@ def generate_zip_download() -> bytes:
 
                     ul = ldf["unit"].iloc[0] if "unit" in ldf.columns else "kWh"
                     fig_bar, fig_err, fig_t, fig_et = make_mc_charts(ldf, ul)
+
+                    # Always export interactive HTML
+                    cfg_b = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Savings")
+                    cfg_er = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Distribution")
+                    cfg_t = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Time")
+                    cfg_et = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff")
+
+                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.html", fig_bar.to_html(include_plotlyjs='cdn', config=cfg_b))
+                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html", fig_err.to_html(include_plotlyjs='cdn', config=cfg_er))
+                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
+                    z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
+
                     try:
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.png",
                                    fig_bar.to_image(format="png", scale=4, width=1600, height=900))
@@ -1417,15 +1436,7 @@ def generate_zip_download() -> bytes:
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.png",
                                    fig_et.to_image(format="png", scale=4, width=1600, height=900))
                     except ValueError:
-                        cfg_b = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Savings")
-                        cfg_er = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Distribution")
-                        cfg_t = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Time")
-                        cfg_et = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff")
-
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.html", fig_bar.to_html(include_plotlyjs='cdn', config=cfg_b))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html", fig_err.to_html(include_plotlyjs='cdn', config=cfg_er))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
+                        pass
 
     return buf.getvalue()
 
