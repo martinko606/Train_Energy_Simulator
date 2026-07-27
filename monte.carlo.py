@@ -1046,8 +1046,8 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
         shapes_speed.append(line_dict)
         shapes_grad.append(line_dict)
-        shapes_energy.append(line_dict)
 
+        shapes_energy.append(line_dict)
         annot_dict = dict(x=x_pos, y=-0.06, xref="x", yref="paper",
                           text=sname, showarrow=False, font=dict(size=10, color=color),
                           xanchor="right", yanchor="top", textangle=-45)
@@ -1055,7 +1055,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
         annotations_speed.append(annot_dict)
         annotations_energy.append(annot_dict)
 
-        # 1. SPEED CHART
+    # 1. SPEED CHART
     fig_speed = go.Figure()
     fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
                                    line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")))
@@ -1079,7 +1079,12 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
     fig_grad = go.Figure()
     if "grad" in hist:
         g_arr = np.array(hist["grad"])
-        # ... existing code ...
+        pos_g = np.clip(g_arr, 0, None)
+        neg_g = np.clip(g_arr, None, 0)
+
+        fig_grad.add_trace(go.Scatter(x=x_data, y=pos_g, name="Uphill",
+                                      line=dict(color=C["red"], width=0, shape="hv"),
+                                      fill="tozeroy", fillcolor="rgba(220,38,38,0.55)", showlegend=False))
         fig_grad.add_trace(go.Scatter(x=x_data, y=neg_g, name="Downhill",
                                       line=dict(color=C["primary"], width=0, shape="hv"),
                                       fill="tozeroy", fillcolor="rgba(37,99,235,0.55)", showlegend=False))
@@ -1098,9 +1103,12 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
     # 3. ENERGY CHART
     fig_energy = go.Figure()
     fig_energy.add_trace(go.Scatter(x=x_data, y=hist["gross_kwh"], name="Gross Energy",
-                                    # ... existing code ...
-                                    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
-                                                                    line=dict(color=C["secondary"], width=2.5)))
+                                    line=dict(color=C["yellow"], width=2),
+                                    fill="tozeroy", fillcolor="rgba(202,138,4,0.15)"))  # Light overlay for gross energy
+    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["regen_kwh"], name="Recuperated",
+                                    line=dict(color=C["green"], width=2, dash="dash")))
+    fig_energy.add_trace(go.Scatter(x=x_data, y=hist["net_kwh"], name="Net Energy",
+                                    line=dict(color=C["secondary"], width=2.5)))
 
     fig_energy.update_layout(
         height=420, margin=dict(l=60, r=40, t=20, b=180), hovermode="x unified",
@@ -1407,10 +1415,6 @@ def generate_zip_download() -> bytes:
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn'))
 
     return buf.getvalue()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  STREAMLIT APP
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STREAMLIT APP
