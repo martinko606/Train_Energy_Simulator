@@ -689,71 +689,67 @@ class TrainSimulator:
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_cd_api_segment_time(station_a: str, station_b: str) -> float | None:
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+@st.cache_data(ttl=86400, show_spinner=False)
+def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
+    import zipfile, io, xml.etree.ElementTree as ET
+    segment_times = {}
 
-    def get_id(name):
-        try:
-            url = "https://ticket-api.cd.cz/api/v1/locations"
-            resp = requests.get(url, params={"name": name, "maxCount": 1}, headers=headers, timeout=3)
-            if resp.status_code == 200:
-                json_data = resp.json()
-                data = json_data.get("data", [])
-                if data and isinstance(data, list):
-                    return data[0].get("key")
-        except:
-            pass
-        return None
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+        xml_files = [n for n in zf.namelist() if n.lower().endswith(('.xml', '.railml'))]
+        for filename in xml_files:
+            with zf.open(filename) as f:
+                try:
+                    tree = ET.parse(f)
+                    root = tree.getroot()
 
-    id_a = get_id(station_a)
-    id_b = get_id(station_b)
+                    for el in root.iter():
+                        if '}' in el.tag: el.tag = el.tag.split('}', 1)[1]
 
-    if not id_a or not id_b: return None
+                    route = []
+                    for loc in root.iter('CZPTTLocation'):
+                        name_el = loc.find('.//PrimaryLocationName')
+                        if name_el is None or not name_el.text: continue
+                        name = name_el.text.strip().lower()
 
-    try:
-        url = "https://ticket-api.cd.cz/api/v1/connections/search"
-        resp = requests.post(url, params={"from": id_a, "to": id_b}, json={"isReturn": False}, headers=headers, timeout=4)
-        if resp.status_code in [200, 201]:
-            conns = resp.json().get("connections", [])
-            for c in conns:
-                # 1. Attempt to parse exact timetabling data from the TrainRouteInfo array
-                trains = c.get("trains", [])
-                if len(trains) == 1:
-                    route = trains[0].get("route", [])
-                    dep_time = None
-                    arr_time = None
+                        arr_time = dep_time = None
+                        for timing in loc.findall('.//Timing'):
+                            qual = timing.get('TimingQualifierCode')
+                            t_el = timing.find('Time')
+                            off_el = timing.find('Offset')
 
-                    for stop in route:
-                        st_info = stop.get("station", {})
-                        st_key = str(st_info.get("key", ""))
-                        st_name = st_info.get("name", "").lower()
+                            if t_el is not None and t_el.text:
+                                t_str = t_el.text.split('T')[-1]
+                                t_str = t_str.split('.')[0].split('+')[0].split('-')[0]
+                                h, m, s = map(int, t_str.split(':'))
+                                offset = int(off_el.text) if (off_el is not None and off_el.text) else 0
+                                abs_sec = h * 3600 + m * 60 + s + offset * 86400
+                                if qual == 'ALA': arr_time = abs_sec
+                                if qual == 'ALD': dep_time = abs_sec
 
-                        # Match departure at Station A
-                        if str(id_a) == st_key or station_a.lower() in st_name:
-                            dep_time = stop.get("dep") or stop.get("arr")
-                        # Match arrival at Station B
-                        if str(id_b) == st_key or station_b.lower() in st_name:
-                            arr_time = stop.get("arr") or stop.get("dep")
+                        if arr_time is None and dep_time is not None: arr_time = dep_time
+                        if dep_time is None and arr_time is not None: dep_time = arr_time
 
-                    if dep_time and arr_time:
-                        try:
-                            # Format returned by API is yyyy-mm-dd H:mm
-                            fmt = "%Y-%m-%d %H:%M"
-                            dt_dep = datetime.strptime(dep_time, fmt)
-                            dt_arr = datetime.strptime(arr_time, fmt)
-                            delta_s = (dt_arr - dt_dep).total_seconds()
-                            if delta_s > 0:
-                                return float(delta_s)
-                        except ValueError:
-                            pass # Fallback to timeLength if parsing fails
+                        if arr_time is not None:
+                            route.append((name, arr_time, dep_time))
 
-                # 2. Fallback to generic duration if route array extraction fails
-                if "timeLength" in c: return float(c["timeLength"]) * 60.0
-                elif "duration" in c: return float(c["duration"]) * 60.0
-    except:
-        pass
-    return None
+                    for i in range(len(route) - 1):
+                        for j in range(i + 1, len(route)):
+                            st_a, _, dep_a = route[i]
+                            st_b, arr_b, _ = route[j]
+                            delta = arr_b - dep_a
+                            if delta > 0:
+                                pair = (st_a, st_b)
+                                if pair not in segment_times:
+                                    segment_times[pair] = []
+                                segment_times[pair].append(delta)
+                except Exception:
+                    pass
+
+    final_db = {}
+    for k, v in segment_times.items():
+        final_db[k] = min(v)
+
+    return final_db
 
 def clean_name(name: str) -> str:
     if pd.isna(name) or not name: return "Unknown"
@@ -1753,6 +1749,19 @@ with st.sidebar:
         coast_km = st.slider("Max coastable incompatible gap (km)", 0.1, 10.0, 0.5, 0.1)
         coast_threshold_m = coast_km * 1000.0
 
+    st.markdown('<div class="sec">⏱️ Timetable Dataset</div>', unsafe_allow_html=True)
+    tt_uploaded = st.file_uploader(
+        "Upload CZPTT Timetable (ZIP)", type=["zip"],
+        key="tt_uploader",
+        help="Upload a ZIP of CZPTT XML files to validate simulation times against scheduled timetables (Cached for 24h)."
+    )
+    if tt_uploaded:
+        with st.spinner("Parsing CZPTT Timetable Dataset (cached for 24h)..."):
+            st.session_state.timetable_db = parse_czptt_timetable_from_bytes(tt_uploaded.getvalue())
+            st.success(f"✅ Loaded {len(st.session_state.timetable_db):,} segment schedules.")
+    else:
+        st.session_state.timetable_db = None
+
     st.markdown('<div class="sec">🎲 Monte Carlo</div>', unsafe_allow_html=True)
     mc_n     = st.number_input("Runs per probability", 20, 500, 100, 10)
     mc_probs = st.multiselect("Probabilities to sweep", options=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0], default=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
@@ -2371,47 +2380,54 @@ with tab_run_t:
 
         if leg.get("hist"):
             fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], leg_snames, df_leg_ref, x_axis=x_axis_choice)
-            st.plotly_chart(fig_s, use_container_width=True, key=f"kin_s_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Speed"))
-            st.plotly_chart(fig_g, use_container_width=True, key=f"kin_g_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Gradient"))
-            st.plotly_chart(fig_e, use_container_width=True, key=f"kin_e_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Energy"))
+            st.plotly_chart(fig_s, use_container_width=True, key=f"kin_s_{leg.get('leg_num', 1)}")
+            st.plotly_chart(fig_g, use_container_width=True, key=f"kin_g_{leg.get('leg_num', 1)}")
+            st.plotly_chart(fig_e, use_container_width=True, key=f"kin_e_{leg.get('leg_num', 1)}")
 
-        with st.expander("⏱️ Timetable Validation (ČD REST API)"):
-            st.markdown("Compare the physics engine's absolute peak-performance times against scheduled passenger timetables. Any time difference reveals the mathematical **operational slack** (buffer time) embedded in real timetables.")
-            if st.button("Fetch Real Timetable & Validate", key=f"val_btn_{leg.get('leg_num', 1)}"):
-                with st.spinner("Querying ticket-api.cd.cz for segment running times..."):
-                    snames_exec = leg.get("snames", [])
-                    arr_times = leg_stats.get("arrival_times", {})
+        with st.expander("⏱️ Timetable Validation (CZPTT Dataset)"):
+            st.markdown("Compare the physics engine's absolute peak-performance times against the scheduled CZPTT passenger timetables. Any time difference reveals the mathematical **operational slack** (buffer time) embedded in real timetables.")
+            if st.button("Validate Schedule", key=f"val_btn_{leg.get('leg_num', 1)}"):
+                snames_exec = leg.get("snames", [])
+                arr_times = leg_stats.get("arrival_times", {})
 
-                    start_st = leg.get("start_name", "")
-                    if start_st and snames_exec and snames_exec[0] != start_st:
-                        snames_exec = [start_st] + snames_exec
+                start_st = leg.get("start_name", "")
+                if start_st and snames_exec and snames_exec[0] != start_st:
+                    snames_exec = [start_st] + snames_exec
 
-                    rows = []
-                    prev_dep_time = 0.0
-                    for i in range(len(snames_exec) - 1):
-                        st_a, st_b = snames_exec[i], snames_exec[i+1]
-                        arr_b = arr_times.get(st_b, 0.0)
+                rows = []
+                prev_dep_time = 0.0
+                tt_db = st.session_state.get("timetable_db", {})
 
-                        sim_s = arr_b - prev_dep_time
-                        prev_dep_time = arr_b + dwell
+                for i in range(len(snames_exec) - 1):
+                    st_a, st_b = snames_exec[i], snames_exec[i+1]
+                    arr_b = arr_times.get(st_b, 0.0)
 
-                        api_s = fetch_cd_api_segment_time(st_a, st_b)
-                        if api_s is not None:
-                            sched_s, src = api_s, "ČD REST API"
-                        else:
-                            sched_s, src = sim_s * 1.12, "12% Slack Fallback (API Unavailable/No Direct Train)"
+                    sim_s = arr_b - prev_dep_time
+                    prev_dep_time = arr_b + dwell
 
-                        diff_s = sched_s - sim_s
-                        rows.append({
-                            "Segment": f"{st_a} ➔ {st_b}",
-                            "Sim. Time": fmt_dur(sim_s),
-                            "Sched. Time": fmt_dur(sched_s),
-                            "Slack / Diff": f"+{fmt_dur(diff_s)}" if diff_s >= 0 else f"-{fmt_dur(abs(diff_s))}",
-                            "Source": src
-                        })
+                    sched_s = None
+                    src = ""
 
-                    if rows: st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                    else: st.warning("Not enough stops served to calculate segment times.")
+                    if tt_db:
+                        sched_s = tt_db.get((st_a.lower(), st_b.lower()))
+
+                    if sched_s is not None:
+                        src = "CZPTT Timetable Data"
+                    else:
+                        sched_s = sim_s * 1.12
+                        src = "12% Slack Fallback (No Match)"
+
+                    diff_s = sched_s - sim_s
+                    rows.append({
+                        "Segment": f"{st_a} ➔ {st_b}",
+                        "Sim. Time": fmt_dur(sim_s),
+                        "Sched. Time": fmt_dur(sched_s),
+                        "Slack / Diff": f"+{fmt_dur(diff_s)}" if diff_s >= 0 else f"-{fmt_dur(abs(diff_s))}",
+                        "Source": src
+                    })
+
+                if rows: st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else: st.warning("Not enough stops served to calculate segment times.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
