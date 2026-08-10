@@ -716,6 +716,38 @@ def fetch_cd_api_segment_time(station_a: str, station_b: str) -> float | None:
         if resp.status_code in [200, 201]:
             conns = resp.json().get("connections", [])
             for c in conns:
+                # 1. Attempt to parse exact timetabling data from the TrainRouteInfo array
+                trains = c.get("trains", [])
+                if len(trains) == 1:
+                    route = trains[0].get("route", [])
+                    dep_time = None
+                    arr_time = None
+
+                    for stop in route:
+                        st_info = stop.get("station", {})
+                        st_key = str(st_info.get("key", ""))
+                        st_name = st_info.get("name", "").lower()
+
+                        # Match departure at Station A
+                        if str(id_a) == st_key or station_a.lower() in st_name:
+                            dep_time = stop.get("dep") or stop.get("arr")
+                        # Match arrival at Station B
+                        if str(id_b) == st_key or station_b.lower() in st_name:
+                            arr_time = stop.get("arr") or stop.get("dep")
+
+                    if dep_time and arr_time:
+                        try:
+                            # Format returned by API is yyyy-mm-dd H:mm
+                            fmt = "%Y-%m-%d %H:%M"
+                            dt_dep = datetime.strptime(dep_time, fmt)
+                            dt_arr = datetime.strptime(arr_time, fmt)
+                            delta_s = (dt_arr - dt_dep).total_seconds()
+                            if delta_s > 0:
+                                return float(delta_s)
+                        except ValueError:
+                            pass # Fallback to timeLength if parsing fails
+
+                # 2. Fallback to generic duration if route array extraction fails
                 if "timeLength" in c: return float(c["timeLength"]) * 60.0
                 elif "duration" in c: return float(c["duration"]) * 60.0
     except:
