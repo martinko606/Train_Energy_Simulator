@@ -696,11 +696,12 @@ def fetch_cd_api_segment_time(station_a: str, station_b: str) -> float | None:
     def get_id(name):
         try:
             url = "https://ticket-api.cd.cz/api/v1/locations"
-            resp = requests.get(url, params={"mask": name, "maxObjCount": 1}, headers=headers, timeout=3)
+            resp = requests.get(url, params={"name": name, "maxCount": 1}, headers=headers, timeout=3)
             if resp.status_code == 200:
-                data = resp.json()
+                json_data = resp.json()
+                data = json_data.get("data", [])
                 if data and isinstance(data, list):
-                    return data[0].get("id")
+                    return data[0].get("key")
         except:
             pass
         return None
