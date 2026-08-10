@@ -560,6 +560,13 @@ class TrainSimulator:
 
         # Watchdog limit to prevent infinite loops on impossible climbs
         max_iters = int(total_m / 0.1) + 36000
+        iters = 0
+        dt = 1.0
+
+        while dist < total_m:
+            iters += 1
+            if iters > max_iters:
+                raise RuntimeError(f"Simulation stalled indefinitely at km {km:.2f} (Speed dropped to 0 and cannot overcome resistance/gradient).")
 
             km       = dist / 1000.0
             rear_km  = max(0.0, km - self.length_m / 1000.0)
