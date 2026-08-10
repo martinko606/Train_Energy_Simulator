@@ -23,6 +23,7 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 import numpy as np, pandas as pd
+import requests
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -524,6 +525,8 @@ class TrainSimulator:
 
         stops_km:   list[float] = []
         stop_names: list[str]   = []
+        stop_arrival_times: dict[str, float] = {}
+
         for st in track.stations:
             km = st["km"]
             if km <= 1e-3:
@@ -542,22 +545,21 @@ class TrainSimulator:
 
         # Train MUST ALWAYS stop at the final destination
         if track.total_km > 0.0:
+            dest_name = track.stations[-1]["name"] if track.stations else "Destination"
             stops_km.append(track.total_km)
-            stop_names.append("Destination")
+            stop_names.append(dest_name)
+
+        orig_stops_km = list(stops_km)
+        orig_stop_names = list(stop_names)
 
         v = dist = e_j = r_j = t_s = 0.0
         hist = {k: [] for k in ("time_s", "km", "v_kmh", "v_limit_kmh",
                                  "gross_kwh", "regen_kwh", "net_kwh", "grad")} if record else None
 
+        stop_arrival_times = {}
+
         # Watchdog limit to prevent infinite loops on impossible climbs
         max_iters = int(total_m / 0.1) + 36000
-        iters = 0
-        dt = 1.0
-
-        while dist < total_m:
-            iters += 1
-            if iters > max_iters:
-                raise RuntimeError(f"Simulation stalled indefinitely at km {km:.2f} (Speed dropped to 0 and cannot overcome resistance/gradient).")
 
             km       = dist / 1000.0
             rear_km  = max(0.0, km - self.length_m / 1000.0)
@@ -567,7 +569,6 @@ class TrainSimulator:
             electr   = seg.get("electrification", "NONE")
             recup_ok = seg.get("recuperation", 0) == 1
 
-            # --- Prune passed stops to prevent desync/infinite stalls ---
             while stops_km and km > stops_km[0] + 0.1:
                 stops_km.pop(0)
 
@@ -639,6 +640,11 @@ class TrainSimulator:
 
             if v < 0.5 and any(abs(km - s) <= 0.1 for s in stops_km):
                 v = 0.0
+
+                stopped_at = next((name for s_km, name in zip(orig_stops_km, orig_stop_names) if abs(s_km - km) <= 0.1), "Unknown")
+                if stopped_at not in stop_arrival_times:
+                    stop_arrival_times[stopped_at] = t_s
+
                 if hist is not None:
                     for pass_no in range(2):
                         vl = min(track.v_limit_span(km, km), self.max_v) * 3.6
@@ -658,6 +664,9 @@ class TrainSimulator:
                     t_s += dwell
 
                 if any(abs(track.total_km - s) <= 0.1 for s in stops_km if abs(km - s) <= 0.1):
+                    # Also record destination arrival
+                    if "Destination" not in stop_arrival_times:
+                        stop_arrival_times["Destination"] = t_s
                     break
 
                 stops_km = [s for s in stops_km if abs(s - km) > 0.1]
@@ -667,12 +676,45 @@ class TrainSimulator:
             regen_kwh      = r_j / 3_600_000.0,
             net_kwh        = (e_j - r_j) / 3_600_000.0,
             journey_time_s = t_s,
+            arrival_times  = stop_arrival_times
         )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_cd_api_segment_time(station_a: str, station_b: str) -> float | None:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    def get_id(name):
+        try:
+            url = "https://ticket-api.cd.cz/api/v1/locations"
+            resp = requests.get(url, params={"mask": name, "maxObjCount": 1}, headers=headers, timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and isinstance(data, list):
+                    return data[0].get("id")
+        except:
+            pass
+        return None
+
+    id_a = get_id(station_a)
+    id_b = get_id(station_b)
+
+    if not id_a or not id_b: return None
+
+    try:
+        url = "https://ticket-api.cd.cz/api/v1/connections/search"
+        resp = requests.post(url, params={"from": id_a, "to": id_b}, json={"isReturn": False}, headers=headers, timeout=4)
+        if resp.status_code in [200, 201]:
+            conns = resp.json().get("connections", [])
+            for c in conns:
+                if "timeLength" in c: return float(c["timeLength"]) * 60.0
+                elif "duration" in c: return float(c["duration"]) * 60.0
+    except:
+        pass
+    return None
+
 def clean_name(name: str) -> str:
     if pd.isna(name) or not name: return "Unknown"
     return "".join([c if c.isalnum() else "_" for c in str(name)])
@@ -705,7 +747,6 @@ def fmt_dur(s: float) -> str:
     return f"{h:02d}h {m:02d}m {sc:02d}s" if h else f"{m:02d}m {sc:02d}s"
 
 def to_unit(stats: dict, traction: str, density: float, eff: float) -> float:
-    # Graceful fallback handler for cached sessions
     if not isinstance(stats, dict):
         return 0.0
     val = stats.get("net_kwh", 0.0)
@@ -1005,13 +1046,10 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
     stops_set = set(stop_names)
 
-    # Force inclusion of start and end stations to ensure they are fully visible
-    # on the axis regardless of stop filtering logic
     all_stops_df = pd.DataFrame()
     if df_profile is not None and not df_profile.empty:
         df_plot = df_profile.copy()
 
-        # Robustly find the first and last actual stations in this specific leg
         valid_stations = df_plot[df_plot["station_name"].str.strip() != ""]
         if not valid_stations.empty:
             first_idx = valid_stations.index[0]
@@ -1054,6 +1092,7 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
         annotations_speed.append(annot_dict)
         annotations_energy.append(annot_dict)
+
 
     # 1. SPEED CHART
     fig_speed = go.Figure()
@@ -1324,11 +1363,10 @@ def generate_zip_download() -> bytes:
 
                 if leg.get("hist"):
                     z.writestr(f"{bn}_{vn}_Leg{lnum}_Kinematics.csv", pd.DataFrame(leg["hist"]).to_csv(index=False))
-                    # Render HTML/PNG figures
                     x_axis = st.session_state.get("x_axis_choice", "Distance (km)")
                     fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], lsnames, df_leg, x_axis)
 
-                    # 1. Always export interactive HTML for post-processing
+                    # Export Interactive HTML formats
                     cfg_s = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Speed")
                     cfg_g = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Gradient")
                     cfg_e = get_chart_config(f"{bn}_{vn}_Leg{lnum}_Energy")
@@ -1336,7 +1374,7 @@ def generate_zip_download() -> bytes:
                     z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn', config=cfg_g))
                     z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn', config=cfg_e))
 
-                    # 2. Attempt to export High-Res PNGs
+                    # Export High-Res PNG formats if supported
                     try:
                         z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.png",
                                    fig_s.to_image(format="png", scale=4, width=1600, height=900))
@@ -1345,7 +1383,7 @@ def generate_zip_download() -> bytes:
                         z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.png",
                                    fig_e.to_image(format="png", scale=4, width=1600, height=900))
                     except ValueError:
-                        pass # Kaleido missing, silently skip PNGs since HTML is already saved
+                        pass # Kaleido missing, silently skip PNGs since HTML is saved
 
         # 3. Monte Carlo
         mc = st.session_state.mc_result
@@ -1372,7 +1410,7 @@ def generate_zip_download() -> bytes:
 
                 fig_bar, fig_err, fig_t, fig_et = make_mc_charts(mc_overall, ul)
 
-                # Always export interactive HTML
+                # HTML Exports
                 cfg_b = get_chart_config(f"{bn}_MonteCarlo_Overall_Savings")
                 cfg_er = get_chart_config(f"{bn}_MonteCarlo_Overall_Distribution")
                 cfg_t = get_chart_config(f"{bn}_MonteCarlo_Overall_Time")
@@ -1383,6 +1421,7 @@ def generate_zip_download() -> bytes:
                 z.writestr(f"{bn}_MonteCarlo_Overall_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
                 z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
 
+                # PNG Exports
                 try:
                     z.writestr(f"{bn}_MonteCarlo_Overall_Savings.png",
                                fig_bar.to_image(format="png", scale=4, width=1600, height=900))
@@ -1415,7 +1454,7 @@ def generate_zip_download() -> bytes:
                     ul = ldf["unit"].iloc[0] if "unit" in ldf.columns else "kWh"
                     fig_bar, fig_err, fig_t, fig_et = make_mc_charts(ldf, ul)
 
-                    # Always export interactive HTML
+                    # HTML Exports
                     cfg_b = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Savings")
                     cfg_er = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Distribution")
                     cfg_t = get_chart_config(f"{bn}_MonteCarlo_Leg{lnum}_Time")
@@ -1426,6 +1465,7 @@ def generate_zip_download() -> bytes:
                     z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t))
                     z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
 
+                    # PNG Exports
                     try:
                         z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.png",
                                    fig_bar.to_image(format="png", scale=4, width=1600, height=900))
@@ -2294,6 +2334,44 @@ with tab_run_t:
             st.plotly_chart(fig_s, use_container_width=True, key=f"kin_s_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Speed"))
             st.plotly_chart(fig_g, use_container_width=True, key=f"kin_g_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Gradient"))
             st.plotly_chart(fig_e, use_container_width=True, key=f"kin_e_{leg.get('leg_num', 1)}", config=get_chart_config(f"{bn}_{vn}_Leg{leg.get('leg_num', 1)}_Energy"))
+
+        with st.expander("⏱️ Timetable Validation (ČD REST API)"):
+            st.markdown("Compare the physics engine's absolute peak-performance times against scheduled passenger timetables. Any time difference reveals the mathematical **operational slack** (buffer time) embedded in real timetables.")
+            if st.button("Fetch Real Timetable & Validate", key=f"val_btn_{leg.get('leg_num', 1)}"):
+                with st.spinner("Querying ticket-api.cd.cz for segment running times..."):
+                    snames_exec = leg.get("snames", [])
+                    arr_times = leg_stats.get("arrival_times", {})
+
+                    start_st = leg.get("start_name", "")
+                    if start_st and snames_exec and snames_exec[0] != start_st:
+                        snames_exec = [start_st] + snames_exec
+
+                    rows = []
+                    prev_dep_time = 0.0
+                    for i in range(len(snames_exec) - 1):
+                        st_a, st_b = snames_exec[i], snames_exec[i+1]
+                        arr_b = arr_times.get(st_b, 0.0)
+
+                        sim_s = arr_b - prev_dep_time
+                        prev_dep_time = arr_b + dwell
+
+                        api_s = fetch_cd_api_segment_time(st_a, st_b)
+                        if api_s is not None:
+                            sched_s, src = api_s, "ČD REST API"
+                        else:
+                            sched_s, src = sim_s * 1.12, "12% Slack Fallback (API Unavailable/No Direct Train)"
+
+                        diff_s = sched_s - sim_s
+                        rows.append({
+                            "Segment": f"{st_a} ➔ {st_b}",
+                            "Sim. Time": fmt_dur(sim_s),
+                            "Sched. Time": fmt_dur(sched_s),
+                            "Slack / Diff": f"+{fmt_dur(diff_s)}" if diff_s >= 0 else f"-{fmt_dur(abs(diff_s))}",
+                            "Source": src
+                        })
+
+                    if rows: st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    else: st.warning("Not enough stops served to calculate segment times.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
