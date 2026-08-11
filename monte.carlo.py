@@ -16,7 +16,6 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Monte Carlo stochastic stop-probability analysis with progress bar
 • High-res 400 DPI Chart Exports & Bulk Zip Data Downloader
 • Offline CZPTT Timetable Validation & CRD mapping
-
 Run:  streamlit run app.py
 """
 from __future__ import annotations
@@ -26,8 +25,10 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 import numpy as np, pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
+import re, unicodedata, difflib
 
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
@@ -62,46 +63,48 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS & DATA EXTRACTORS
 # ─────────────────────────────────────────────────────────────────────────────
-def normalize_station_name(n: str) -> str:
-    """Intelligently cleans and normalizes complex Czech station abbreviations."""
+
+def super_normalize(n: str) -> str:
+    """Universally flattens Czech station names to create an indestructible fingerprint."""
     if not n or pd.isna(n): return ""
-    n = str(n).lower().replace("-", " ")
+    n = str(n).lower()
 
-    repls = {
-        "frýdl.": "frýdlant ",
-        "ostr.": "ostravicí ",
-        "n.": "nad ",
-        "p.": "pod ",
-        "zastávka": " zastavka ",
-        "zast.": " zastavka ",
-        "hl.n.": " hln ",
-        "hlavní nádraží": " hln ",
-        "město": " mesto ",
-        "dvorana": " dvorana "
-    }
-    for k, v in repls.items():
-        n = n.replace(k, v)
+    # Strip all diacritics/accents (e.g. á -> a, č -> c)
+    n = ''.join(c for c in unicodedata.normalize('NFD', n) if unicodedata.category(c) != 'Mn')
 
-    n = "".join(c if c.isalnum() else " " for c in n)
+    # Replace non-alphanumeric chars (dashes, dots) with spaces
+    n = re.sub(r'[^a-z0-9]', ' ', n)
 
     words = n.split()
     out_words = []
+
+    # Smart expansions to prevent collisions (e.g. Nová Ves vs Nová Ves z)
+    expansions = {
+        "z": "zastavka", "zast": "zastavka", "zastavka": "zastavka",
+        "hl": "hlavni",  "hln": "hlavni",    "hlavni": "hlavni",
+        "n": "nad",      "nad": "nad",
+        "p": "pod",      "pod": "pod",
+        "m": "mesto",    "mesto": "mesto"
+    }
+
+    # Aggressively ignore common operational noise that doesn't define geography
+    ignore = {"ahr", "nz", "odb", "vyh", "st", "zst", "os", "od", "dvorana"}
+
     for w in words:
-        if w in ("z", "zast"):
-            out_words.append("zastavka")
+        if w in ignore: continue
+        # Expand known abbreviations, otherwise keep the word
+        if w in expansions:
+            out_words.append(expansions[w])
         else:
             out_words.append(w)
 
-    seen = []
-    for w in out_words:
-        if w not in seen:
-            seen.append(w)
-
-    return " ".join(seen)
+    # Join with spaces so difflib can evaluate word sequences correctly
+    return " ".join(out_words)
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
-    segment_times = {}
+    crd_pairs = {}
+    norm_pairs = {}
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
         xml_files = [n for n in zf.namelist() if n.lower().endswith(('.xml', '.railml'))]
@@ -148,28 +151,25 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                             code_a, name_a, _, dep_a = route[i]
                             code_b, name_b, arr_b, _ = route[j]
                             delta = arr_b - dep_a
+
                             if delta > 0:
-                                # Priority 1: Map exact CRD Codes
+                                # Dictionary 1: Absolute Mathematical Codes
                                 if code_a and code_b:
                                     pair = (code_a, code_b)
-                                    if pair not in segment_times or delta < segment_times[pair]:
-                                        segment_times[pair] = delta
+                                    if pair not in crd_pairs or delta < crd_pairs[pair]:
+                                        crd_pairs[pair] = delta
 
-                                # Priority 2: Map exact string names
-                                if name_a and name_b:
-                                    pair_name = (name_a.lower(), name_b.lower())
-                                    if pair_name not in segment_times or delta < segment_times[pair_name]:
-                                        segment_times[pair_name] = delta
-
-                                # Priority 3: Map fuzzy/normalized string names
-                                norm_a, norm_b = normalize_station_name(name_a), normalize_station_name(name_b)
+                                # Dictionary 2: Universal Canonical Fingerprints
+                                norm_a = super_normalize(name_a)
+                                norm_b = super_normalize(name_b)
                                 if norm_a and norm_b:
                                     pair_norm = (norm_a, norm_b)
-                                    if pair_norm not in segment_times or delta < segment_times[pair_norm]:
-                                        segment_times[pair_norm] = delta
+                                    if pair_norm not in norm_pairs or delta < norm_pairs[pair_norm]:
+                                        norm_pairs[pair_norm] = delta
                 except Exception:
                     pass
-    return segment_times
+
+    return {"crd_pairs": crd_pairs, "norm_pairs": norm_pairs}
 
 def clean_name(name: str) -> str:
     if pd.isna(name) or not name: return "Unknown"
@@ -1050,7 +1050,7 @@ def make_route_map(df: pd.DataFrame, via_ops: list, parser: DYPODParser, show_ha
             cur_hover.append(f"{seg_electr}<br>km {row_b['cum_km']:.2f}")
 
         if cur_lats:
-            runs.append(dict(electr=cur_electr, lats=cur_lats, lons=cur_lons, hover=cur_hover))
+            runs.append(dict(electr=cur_electr, lats=cur_lons, lons=cur_lons, hover=cur_hover))
 
         seen_labels: set = set()
         for run in runs:
@@ -1674,7 +1674,7 @@ with st.sidebar:
             with st.spinner("Extracting CZPTT Database..."):
                 tt_db = parse_czptt_timetable_from_bytes(tt_bytes)
             st.session_state["timetable_db"] = tt_db
-            st.success(f"✅ Loaded {len(tt_db):,} schedule segments.")
+            st.success(f"✅ Loaded timetable dictionary.")
         except Exception as e:
             st.error(f"Error parsing timetable: {e}")
 
@@ -2439,6 +2439,9 @@ with tab_run_t:
                 rows = []
                 prev_dep_time = 0.0
                 tt_db = st.session_state.get("timetable_db", {})
+                crd_pairs = tt_db.get("crd_pairs", {})
+                norm_pairs = tt_db.get("norm_pairs", {})
+                known_norms = list(set([n for pair in norm_pairs.keys() for n in pair]))
 
                 for i in range(len(snames_exec) - 1):
                     st_a, st_b = snames_exec[i], snames_exec[i+1]
@@ -2455,21 +2458,30 @@ with tab_run_t:
                     sched_s = None
                     src = ""
 
+                    norm_a = super_normalize(st_a)
+                    norm_b = super_normalize(st_b)
+
                     if tt_db:
                         # Priority 1: Exact CRD / SR70 Code Match
-                        if sr70_a and sr70_b:
-                            sched_s = tt_db.get((sr70_a, sr70_b))
-                            if sched_s is not None: src = "CZPTT (Exact CRD)"
+                        if sr70_a and sr70_b and (sr70_a, sr70_b) in crd_pairs:
+                            sched_s = crd_pairs[(sr70_a, sr70_b)]
+                            src = "CZPTT (Exact CRD)"
 
-                        # Priority 2: Exact String Name Fallback
-                        if sched_s is None:
-                            sched_s = tt_db.get((st_a.lower(), st_b.lower()))
-                            if sched_s is not None: src = "CZPTT (Exact Name)"
+                        # Priority 2: Universal Name Fingerprint
+                        elif (norm_a, norm_b) in norm_pairs:
+                            sched_s = norm_pairs[(norm_a, norm_b)]
+                            src = "CZPTT (Universal Name)"
 
-                        # Priority 3: Fuzzy Normalized String Fallback
-                        if sched_s is None:
-                            sched_s = tt_db.get((normalize_station_name(st_a), normalize_station_name(st_b)))
-                            if sched_s is not None: src = "CZPTT (Fuzzy Name)"
+                        # Priority 3: Difflib AI Fuzzy Search
+                        else:
+                            matches_a = difflib.get_close_matches(norm_a, known_norms, n=1, cutoff=0.55)
+                            matches_b = difflib.get_close_matches(norm_b, known_norms, n=1, cutoff=0.55)
+
+                            if matches_a and matches_b:
+                                fuzzy_a, fuzzy_b = matches_a[0], matches_b[0]
+                                if (fuzzy_a, fuzzy_b) in norm_pairs:
+                                    sched_s = norm_pairs[(fuzzy_a, fuzzy_b)]
+                                    src = "CZPTT (Fuzzy AI Match)"
 
                     if sched_s is None:
                         sched_s = sim_s * 1.12
