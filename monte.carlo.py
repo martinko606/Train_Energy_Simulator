@@ -1815,43 +1815,6 @@ with st.sidebar:
         coast_km = st.slider("Max coastable incompatible gap (km)", 0.1, 10.0, 0.5, 0.1)
         coast_threshold_m = coast_km * 1000.0
 
-    st.markdown('<div class="sec">⏱️ Timetable Dataset</div>', unsafe_allow_html=True)
-    tt_uploaded = st.file_uploader(
-        "Upload CZPTT Timetable (ZIP)", type=["zip"],
-        key="tt_uploader",
-        help="Upload a ZIP of CZPTT XML files to validate simulation times against scheduled timetables (Cached for 24h).",
-        label_visibility="collapsed"
-    )
-
-    tt_path = None
-    if tt_uploaded:
-        tt_file_id = f"{tt_uploaded.name}_{tt_uploaded.size}"
-        if st.session_state.get("last_tt_id") != tt_file_id:
-            with st.spinner("Parsing CZPTT Timetable Dataset (cached for 24h)..."):
-                st.session_state.timetable_db = parse_czptt_timetable_from_bytes(tt_uploaded.getvalue())
-            st.session_state.last_tt_id = tt_file_id
-            st.success(f"✅ Loaded {len(st.session_state.timetable_db):,} segment schedules.")
-    else:
-        # Search for local CZPTT zip files
-        local_tts = sorted(glob.glob("*CZPTT*.zip") + glob.glob("*timetable*.zip"))
-        if local_tts:
-            sel_tt = st.selectbox("Or pick local timetable file", ["None"] + local_tts, label_visibility="collapsed")
-            if sel_tt != "None":
-                tt_file_id = f"local_{sel_tt}"
-                if st.session_state.get("last_tt_id") != tt_file_id:
-                    with st.spinner(f"Parsing local CZPTT Timetable Dataset: {sel_tt} (cached for 24h)..."):
-                        with open(sel_tt, "rb") as f:
-                            st.session_state.timetable_db = parse_czptt_timetable_from_bytes(f.read())
-                    st.session_state.last_tt_id = tt_file_id
-                    st.success(f"✅ Loaded {len(st.session_state.timetable_db):,} segment schedules.")
-            else:
-                st.session_state.timetable_db = None
-                st.session_state.last_tt_id = None
-        else:
-             st.session_state.timetable_db = None
-             st.session_state.last_tt_id = None
-
-
     st.markdown('<div class="sec">🎲 Monte Carlo</div>', unsafe_allow_html=True)
     mc_n     = st.number_input("Runs per probability", 20, 500, 100, 10)
     mc_probs = st.multiselect("Probabilities to sweep", options=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0], default=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
