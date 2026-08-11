@@ -15,7 +15,7 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Kinematic chart with time/distance X-axis toggle, gradient ribbon & station annotations
 • Monte Carlo stochastic stop-probability analysis with progress bar
 • High-res 400 DPI Chart Exports & Bulk Zip Data Downloader
-• Offline CZPTT Timetable Validation & CRD mapping
+• Offline CZPTT Timetable Validation & CRD mapping with Semantic Fuzzing
 Run:  streamlit run app.py
 """
 from __future__ import annotations
@@ -28,7 +28,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
-import re, unicodedata, difflib
+import difflib
+import re
+import unicodedata
 
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
@@ -63,48 +65,31 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS & DATA EXTRACTORS
 # ─────────────────────────────────────────────────────────────────────────────
-
 def super_normalize(n: str) -> str:
-    """Universally flattens Czech station names to create an indestructible fingerprint."""
-    if not n or pd.isna(n): return ""
-    n = str(n).lower()
-
-    # Strip all diacritics/accents (e.g. á -> a, č -> c)
-    n = ''.join(c for c in unicodedata.normalize('NFD', n) if unicodedata.category(c) != 'Mn')
-
-    # Replace non-alphanumeric chars (dashes, dots) with spaces
-    n = re.sub(r'[^a-z0-9]', ' ', n)
+    """Semantic abbreviation expansion to prevent string collisions on Czech station names."""
+    if not n: return ""
+    n = n.lower().replace("-", " ")
+    # Strip accents for baseline comparison
+    n = "".join(c for c in unicodedata.normalize('NFD', n) if unicodedata.category(c) != 'Mn')
 
     words = n.split()
-    out_words = []
-
-    # Smart expansions to prevent collisions (e.g. Nová Ves vs Nová Ves z)
-    expansions = {
-        "z": "zastavka", "zast": "zastavka", "zastavka": "zastavka",
-        "hl": "hlavni",  "hln": "hlavni",    "hlavni": "hlavni",
-        "n": "nad",      "nad": "nad",
-        "p": "pod",      "pod": "pod",
-        "m": "mesto",    "mesto": "mesto"
-    }
-
-    # Aggressively ignore common operational noise that doesn't define geography
-    ignore = {"ahr", "nz", "odb", "vyh", "st", "zst", "os", "od", "dvorana"}
-
+    out = []
     for w in words:
-        if w in ignore: continue
-        # Expand known abbreviations, otherwise keep the word
-        if w in expansions:
-            out_words.append(expansions[w])
-        else:
-            out_words.append(w)
+        if w in ["z", "z.", "zast", "zast.", "zastavka"]: out.append("zastavka")
+        elif w in ["n", "n."]: out.append("nad")
+        elif w in ["p", "p."]: out.append("pod")
+        elif w in ["u", "u."]: out.append("u")
+        elif w in ["mesto", "m."]: out.append("mesto")
+        elif w in ["hl.n.", "hl.n", "hl", "hl."]: out.append("hlavni")
+        elif w in ["ahr", "nz", "odb", "odb.", "vyh", "vyh.", "dvorana"]: continue
+        else: out.append(re.sub(r'[^a-z]', '', w))
 
-    # Join with spaces so difflib can evaluate word sequences correctly
-    return " ".join(out_words)
+    return " ".join(filter(None, out))
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
-    crd_pairs = {}
-    norm_pairs = {}
+    segment_times_crd = {}
+    segment_times_name = {}
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
         xml_files = [n for n in zf.namelist() if n.lower().endswith(('.xml', '.railml'))]
@@ -151,25 +136,22 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                             code_a, name_a, _, dep_a = route[i]
                             code_b, name_b, arr_b, _ = route[j]
                             delta = arr_b - dep_a
-
                             if delta > 0:
-                                # Dictionary 1: Absolute Mathematical Codes
+                                # Priority 1: Map exact CRD Codes securely
                                 if code_a and code_b:
                                     pair = (code_a, code_b)
-                                    if pair not in crd_pairs or delta < crd_pairs[pair]:
-                                        crd_pairs[pair] = delta
+                                    if pair not in segment_times_crd or delta < segment_times_crd[pair]:
+                                        segment_times_crd[pair] = delta
 
-                                # Dictionary 2: Universal Canonical Fingerprints
-                                norm_a = super_normalize(name_a)
-                                norm_b = super_normalize(name_b)
+                                # Priority 2: Map highly robust semantic string names
+                                norm_a, norm_b = super_normalize(name_a), super_normalize(name_b)
                                 if norm_a and norm_b:
                                     pair_norm = (norm_a, norm_b)
-                                    if pair_norm not in norm_pairs or delta < norm_pairs[pair_norm]:
-                                        norm_pairs[pair_norm] = delta
+                                    if pair_norm not in segment_times_name or delta < segment_times_name[pair_norm]:
+                                        segment_times_name[pair_norm] = delta
                 except Exception:
                     pass
-
-    return {"crd_pairs": crd_pairs, "norm_pairs": norm_pairs}
+    return {"crd": segment_times_crd, "name": segment_times_name}
 
 def clean_name(name: str) -> str:
     if pd.isna(name) or not name: return "Unknown"
@@ -603,6 +585,7 @@ class DYPODParser:
     def op_name(self, op_id: str) -> str:
         return self.op_info.get(op_id, {}).get("name", op_id)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  TRACK PROFILE  (physics wrapper)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -679,6 +662,7 @@ class TrackProfile:
     @property
     def n_request(self) -> int:
         return sum(1 for s in self.stations if s["type"] == "R")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  TRAIN SIMULATOR
@@ -882,6 +866,7 @@ class TrainSimulator:
             arrival_times  = arrival_times
         )
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  CHART EXPORT & GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1050,7 +1035,7 @@ def make_route_map(df: pd.DataFrame, via_ops: list, parser: DYPODParser, show_ha
             cur_hover.append(f"{seg_electr}<br>km {row_b['cum_km']:.2f}")
 
         if cur_lats:
-            runs.append(dict(electr=cur_electr, lats=cur_lons, lons=cur_lons, hover=cur_hover))
+            runs.append(dict(electr=cur_electr, lats=cur_lats, lons=cur_lons, hover=cur_hover))
 
         seen_labels: set = set()
         for run in runs:
@@ -1674,7 +1659,7 @@ with st.sidebar:
             with st.spinner("Extracting CZPTT Database..."):
                 tt_db = parse_czptt_timetable_from_bytes(tt_bytes)
             st.session_state["timetable_db"] = tt_db
-            st.success(f"✅ Loaded timetable dictionary.")
+            st.success(f"✅ Loaded {len(tt_db.get('crd', {})):,} schedule segments.")
         except Exception as e:
             st.error(f"Error parsing timetable: {e}")
 
@@ -2089,7 +2074,6 @@ with tab_prof:
 
     st.markdown(f"### 📍 {sn}  →  {en}")
 
-    # Electrification alerts
     if ea is not None and traction == "ELECTRIC":
         ue = ea.get("normal_ue_km", ea.get("incomp_km", 0.0))
         gw = ea.get("gateway_km", 0.0)
@@ -2111,7 +2095,6 @@ with tab_prof:
         elif ue > 0:
             st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km incompatible track</b> exceeds coasting limit ({coast_lbl}). Raise limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
 
-    # KPI row
     kc = st.columns(6)
     kc[0].markdown(kpi_card(f"{total_km:.1f} km",       "Route length"),            unsafe_allow_html=True)
     kc[1].markdown(kpi_card(str(len(stops_x)),           "Mandatory stops (X)"),    unsafe_allow_html=True)
@@ -2130,7 +2113,6 @@ with tab_prof:
 
     st.plotly_chart(make_profile_chart(df), use_container_width=True, key="profile_chart_tab1", config=get_chart_config(f"{get_base_filename()}_TrackProfile"))
 
-    # Electrification legend badges
     badges = ""
     for sys in df["electrification"].unique():
         col   = elec_color(sys)
@@ -2142,14 +2124,12 @@ with tab_prof:
     st.markdown(badges, unsafe_allow_html=True)
     st.write("")
 
-    # Route map
     map_df = df.dropna(subset=["lat","lon"])
     if not map_df.empty:
         with st.expander("🗺️ Route map", expanded=True):
             st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
                             use_container_width=True, key="route_map_tab1", config=get_chart_config(f"{get_base_filename()}_RouteMap"))
 
-    # Speed summary table
     with st.expander("⚡ Speed & electrification summary"):
         spd_df = df[["cum_km","station_name","stop_type","speed_kmh",
                       "gradient_perm","electrification","n_tracks"]].copy()
@@ -2180,7 +2160,6 @@ with tab_prof:
                                margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig_tbl, use_container_width=True, key="speed_table_tab1", config=get_chart_config(f"{get_base_filename()}_SpeedSummary"))
 
-    # Full data table
     with st.expander("📋 Full profile data table"):
         cols=["cum_km","station_name","stop_type","speed_kmh","gradient_perm",
               "electrification","recuperation","length_m","n_tracks"]
@@ -2203,7 +2182,6 @@ with tab_edit:
     st.markdown("### ✏️ Interactive Profile Editor")
     df = st.session_state.profile_df
 
-    # Via waypoints
     st.markdown('<div class="sec">📍 Manual Routing Waypoints</div>', unsafe_allow_html=True)
 
     terminals = st.session_state.get("scenario_terminals", [])
@@ -2241,7 +2219,7 @@ with tab_edit:
                 st.rerun()
 
     if any(st.session_state.via_ops.values()):
-        st.markdown("**Manual routing waypoints:**")
+        st.markdown("**Manual waypoints:**")
         for leg_idx in sorted(st.session_state.via_ops.keys()):
             if not st.session_state.via_ops.get(leg_idx):
                 continue
@@ -2271,7 +2249,7 @@ with tab_edit:
             st.session_state.rebuild_profile = True
             st.rerun()
     else:
-        st.markdown('<div class="info-box">No manual waypoints. Router uses direct shortest path for each leg.</div>',
+        st.markdown('<div class="info-box">No manual waypoints. Router uses direct shortest path.</div>',
                     unsafe_allow_html=True)
 
     if df is not None:
@@ -2392,7 +2370,6 @@ with tab_run_t:
 
         leg_snames = leg.get("snames", [])
         total_possible = leg.get("total_possible_stops", len(leg_snames))
-
         st.markdown(f"**Stops served ({len(leg_snames)} / {total_possible}):** " + ("  →  ".join(f"*{s}*" for s in leg_snames) if leg_snames else "None"))
 
         leg_stats = leg.get("stats", {})
@@ -2411,11 +2388,8 @@ with tab_run_t:
         lk2.metric(f"Consumed [{unit_lbl}]", f"{leg_cons:.1f}")
         lk3.metric(f"Saved [{unit_lbl}]", f"{leg_saved:.1f}")
         lk4.metric("Avg Speed", f"{leg_avg_spd:.1f} km/h")
-
-        if _tr == "DIESEL":
-            lk5.metric(f"Specific Fuel", f"{leg_cons/leg_dist*1000:.1f} mL/km" if leg_dist > 0 else "0.0")
-        else:
-            lk5.metric(f"Specific Energy", f"{leg_stats.get('net_kwh', 0)/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
+        if _tr == "DIESEL": lk5.metric(f"Specific Fuel", f"{leg_cons/leg_dist*1000:.1f} mL/km" if leg_dist > 0 else "0.0")
+        else: lk5.metric(f"Specific Energy", f"{leg_stats.get('net_kwh', 0)/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
 
         if leg.get("hist"):
             fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], leg_snames, df_leg_ref, x_axis=x_axis_choice)
@@ -2426,6 +2400,11 @@ with tab_run_t:
         # --- Offline CZPTT Timetable Validation ---
         with st.expander("⏱️ Timetable Validation (CZPTT Dataset)"):
             st.markdown("Compare the physics engine's absolute peak-performance times against the scheduled CZPTT passenger timetables. Any time difference reveals the mathematical **operational slack** (buffer time) embedded in real timetables.")
+
+            val_mode = st.radio("Validation Level",
+                                ["Every Stop (Adjacent Segments)", "Major Stations Only (Blocks)", "Total Journey (Origin ➔ Destination)"],
+                                horizontal=True, key=f"val_mode_{leg.get('leg_num', 1)}")
+
             if st.button("Validate Schedule", key=f"val_btn_{leg.get('leg_num', 1)}"):
                 snames_exec = leg.get("snames", [])
                 sops_exec   = leg.get("sops", [])
@@ -2436,24 +2415,45 @@ with tab_run_t:
                     snames_exec = [start_st] + snames_exec
                     sops_exec = [terminals[leg.get("leg_num", 1)-1]] + sops_exec
 
+                # --- Filtering Logic ---
+                if val_mode == "Major Stations Only (Blocks)":
+                    major_ops = set(df_leg_ref[df_leg_ref["stop_type"] == "X"]["op_id"].tolist())
+                    if sops_exec:
+                        major_ops.add(sops_exec[0])
+                        major_ops.add(sops_exec[-1])
+
+                    f_names, f_ops = [], []
+                    for n, o in zip(snames_exec, sops_exec):
+                        if o in major_ops:
+                            f_names.append(n)
+                            f_ops.append(o)
+                    snames_exec, sops_exec = f_names, f_ops
+
+                elif val_mode == "Total Journey (Origin ➔ Destination)":
+                    if len(snames_exec) >= 2:
+                        snames_exec = [snames_exec[0], snames_exec[-1]]
+                        sops_exec = [sops_exec[0], sops_exec[-1]]
+
                 rows = []
-                prev_dep_time = 0.0
                 tt_db = st.session_state.get("timetable_db", {})
-                crd_pairs = tt_db.get("crd_pairs", {})
-                norm_pairs = tt_db.get("norm_pairs", {})
-                known_norms = list(set([n for pair in norm_pairs.keys() for n in pair]))
+                crd_pairs = tt_db.get("crd", {}) if isinstance(tt_db, dict) else {}
+                norm_pairs = tt_db.get("name", {}) if isinstance(tt_db, dict) else {}
+                known_norms = list(set([station for pair in norm_pairs.keys() for station in pair]))
 
                 for i in range(len(snames_exec) - 1):
-                    st_a, st_b = snames_exec[i], snames_exec[i + 1]
-                    op_a, op_b = sops_exec[i], sops_exec[i + 1]
+                    st_a, st_b = snames_exec[i], snames_exec[i+1]
+                    op_a, op_b = sops_exec[i], sops_exec[i+1]
 
                     sr70_a = "".join(filter(str.isdigit, parser.op_info.get(op_a, {}).get("sr70", "")))
                     sr70_b = "".join(filter(str.isdigit, parser.op_info.get(op_b, {}).get("sr70", "")))
 
-                    arr_b = arr_times.get(st_b, 0.0)
+                    if i == 0:
+                        dep_a = 0.0
+                    else:
+                        dep_a = arr_times.get(st_a, 0.0) + dwell
 
-                    sim_s = arr_b - prev_dep_time
-                    prev_dep_time = arr_b + dwell
+                    arr_b = arr_times.get(st_b, 0.0)
+                    sim_s = arr_b - dep_a
 
                     sched_s = None
                     src = ""
@@ -2480,7 +2480,7 @@ with tab_run_t:
                                 sched_s = norm_pairs[(norm_b, norm_a)]
                                 src = "CZPTT (Name Reverse Dir)"
 
-                        # Priority 3: Difflib AI Fuzzy Search (Loosened cutoff to 0.45)
+                        # Priority 3: Difflib AI Fuzzy Search
                         if sched_s is None:
                             matches_a = difflib.get_close_matches(norm_a, known_norms, n=1, cutoff=0.45)
                             matches_b = difflib.get_close_matches(norm_b, known_norms, n=1, cutoff=0.45)
@@ -2614,6 +2614,7 @@ with tab_mc_t:
             st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Tradeoff_{key_prefix}"))
 
         st.markdown("<hr>", unsafe_allow_html=True)
+
 
     render_mc_dashboard(mc_overall, "Overall Scenario (Total Itinerary)", route_n, "overall")
 
