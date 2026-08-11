@@ -2444,8 +2444,8 @@ with tab_run_t:
                 known_norms = list(set([n for pair in norm_pairs.keys() for n in pair]))
 
                 for i in range(len(snames_exec) - 1):
-                    st_a, st_b = snames_exec[i], snames_exec[i+1]
-                    op_a, op_b = sops_exec[i], sops_exec[i+1]
+                    st_a, st_b = snames_exec[i], snames_exec[i + 1]
+                    op_a, op_b = sops_exec[i], sops_exec[i + 1]
 
                     sr70_a = "".join(filter(str.isdigit, parser.op_info.get(op_a, {}).get("sr70", "")))
                     sr70_b = "".join(filter(str.isdigit, parser.op_info.get(op_b, {}).get("sr70", "")))
@@ -2463,25 +2463,36 @@ with tab_run_t:
 
                     if tt_db:
                         # Priority 1: Exact CRD / SR70 Code Match
-                        if sr70_a and sr70_b and (sr70_a, sr70_b) in crd_pairs:
-                            sched_s = crd_pairs[(sr70_a, sr70_b)]
-                            src = "CZPTT (Exact CRD)"
+                        if sr70_a and sr70_b:
+                            if (sr70_a, sr70_b) in crd_pairs:
+                                sched_s = crd_pairs[(sr70_a, sr70_b)]
+                                src = "CZPTT (Exact CRD)"
+                            elif (sr70_b, sr70_a) in crd_pairs:
+                                sched_s = crd_pairs[(sr70_b, sr70_a)]
+                                src = "CZPTT (CRD Reverse Dir)"
 
                         # Priority 2: Universal Name Fingerprint
-                        elif (norm_a, norm_b) in norm_pairs:
-                            sched_s = norm_pairs[(norm_a, norm_b)]
-                            src = "CZPTT (Universal Name)"
+                        if sched_s is None:
+                            if (norm_a, norm_b) in norm_pairs:
+                                sched_s = norm_pairs[(norm_a, norm_b)]
+                                src = "CZPTT (Universal Name)"
+                            elif (norm_b, norm_a) in norm_pairs:
+                                sched_s = norm_pairs[(norm_b, norm_a)]
+                                src = "CZPTT (Name Reverse Dir)"
 
-                        # Priority 3: Difflib AI Fuzzy Search
-                        else:
-                            matches_a = difflib.get_close_matches(norm_a, known_norms, n=1, cutoff=0.55)
-                            matches_b = difflib.get_close_matches(norm_b, known_norms, n=1, cutoff=0.55)
+                        # Priority 3: Difflib AI Fuzzy Search (Loosened cutoff to 0.45)
+                        if sched_s is None:
+                            matches_a = difflib.get_close_matches(norm_a, known_norms, n=1, cutoff=0.45)
+                            matches_b = difflib.get_close_matches(norm_b, known_norms, n=1, cutoff=0.45)
 
                             if matches_a and matches_b:
                                 fuzzy_a, fuzzy_b = matches_a[0], matches_b[0]
                                 if (fuzzy_a, fuzzy_b) in norm_pairs:
                                     sched_s = norm_pairs[(fuzzy_a, fuzzy_b)]
                                     src = "CZPTT (Fuzzy AI Match)"
+                                elif (fuzzy_b, fuzzy_a) in norm_pairs:
+                                    sched_s = norm_pairs[(fuzzy_b, fuzzy_a)]
+                                    src = "CZPTT (Fuzzy Reverse Dir)"
 
                     if sched_s is None:
                         sched_s = sim_s * 1.12
