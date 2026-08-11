@@ -16,6 +16,7 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Monte Carlo stochastic stop-probability analysis with progress bar
 • High-res 400 DPI Chart Exports & Bulk Zip Data Downloader
 • Offline CZPTT Timetable Validation & CRD mapping
+
 Run:  streamlit run app.py
 """
 from __future__ import annotations
@@ -25,11 +26,9 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 import numpy as np, pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 
-# STREAMLIT_CHUNK:Defining color palette and constants...
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
     primary="#2563EB", secondary="#7C3AED", accent="#EA580C",
@@ -48,7 +47,6 @@ PASSENGER_TYPES = {"station", "stoppingPoint"}
 MANDATORY_TYPES = {"station"}
 REQUEST_TYPES   = {"stoppingPoint"}
 
-# STREAMLIT_CHUNK:Initializing vehicle fleet presets...
 # ── vehicle fleet ─────────────────────────────────────────────────────────────
 PREDEFINED_VEHICLES: dict[str, dict] = {
     "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
@@ -61,30 +59,49 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
     "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=380_000, length=157.9,  power=5_500, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200, systems=["3,000V/0Hz", "25,000V/50Hz", "15,000V/16.7Hz"]),
 }
 
-# STREAMLIT_CHUNK:Building helper and extraction functions...
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS & DATA EXTRACTORS
 # ─────────────────────────────────────────────────────────────────────────────
+def normalize_station_name(n: str) -> str:
+    """Intelligently cleans and normalizes complex Czech station abbreviations."""
+    if not n or pd.isna(n): return ""
+    n = str(n).lower().replace("-", " ")
+
+    repls = {
+        "frýdl.": "frýdlant ",
+        "ostr.": "ostravicí ",
+        "n.": "nad ",
+        "p.": "pod ",
+        "zastávka": " zastavka ",
+        "zast.": " zastavka ",
+        "hl.n.": " hln ",
+        "hlavní nádraží": " hln ",
+        "město": " mesto ",
+        "dvorana": " dvorana "
+    }
+    for k, v in repls.items():
+        n = n.replace(k, v)
+
+    n = "".join(c if c.isalnum() else " " for c in n)
+
+    words = n.split()
+    out_words = []
+    for w in words:
+        if w in ("z", "zast"):
+            out_words.append("zastavka")
+        else:
+            out_words.append(w)
+
+    seen = []
+    for w in out_words:
+        if w not in seen:
+            seen.append(w)
+
+    return " ".join(seen)
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
     segment_times = {}
-
-    def normalize_name(n: str) -> str:
-        if not n: return ""
-        n = n.lower().replace("-", " ")
-        # Advanced Czech station name normalization & abbreviation expansion
-        replacements = [
-            (" zastávka", ""), (" hl.n.", ""), (" hlavní nádraží", ""),
-            (" dvorana", ""), (" město", ""), (" z", ""),
-            ("n. ", "nad "), ("p. ", "pod "), ("u ", "u "),
-            ("ostr.", "ostravicí"), ("frýdl.", "frýdlant"),
-            (".", " ")  # Remove trailing dots from abbreviations
-        ]
-        for bad, good in replacements:
-            n = n.replace(bad, good)
-
-        # Remove extra whitespace and clean up
-        return " ".join(n.split())
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
         xml_files = [n for n in zf.namelist() if n.lower().endswith(('.xml', '.railml'))]
@@ -145,17 +162,11 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                                         segment_times[pair_name] = delta
 
                                 # Priority 3: Map fuzzy/normalized string names
-                                norm_a, norm_b = normalize_name(name_a), normalize_name(name_b)
+                                norm_a, norm_b = normalize_station_name(name_a), normalize_station_name(name_b)
                                 if norm_a and norm_b:
                                     pair_norm = (norm_a, norm_b)
                                     if pair_norm not in segment_times or delta < segment_times[pair_norm]:
                                         segment_times[pair_norm] = delta
-
-                                # Priority 4: Super-fuzzy (first 5 characters match) for extreme abbreviations
-                                if len(norm_a) >= 5 and len(norm_b) >= 5:
-                                    pair_super = (norm_a[:5], norm_b[:5])
-                                    if pair_super not in segment_times or delta < segment_times[pair_super]:
-                                        segment_times[pair_super] = delta
                 except Exception:
                     pass
     return segment_times
@@ -239,7 +250,6 @@ def _spd_cell_color(v):
     return f"rgba({r},{g},{b},0.25)"
 
 
-# STREAMLIT_CHUNK:Setting up the DYPOD parser class...
 # ─────────────────────────────────────────────────────────────────────────────
 #  DYPOD railML PARSER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -593,8 +603,6 @@ class DYPODParser:
     def op_name(self, op_id: str) -> str:
         return self.op_info.get(op_id, {}).get("name", op_id)
 
-
-# STREAMLIT_CHUNK:Building Physics Engine Classes...
 # ─────────────────────────────────────────────────────────────────────────────
 #  TRACK PROFILE  (physics wrapper)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -671,7 +679,6 @@ class TrackProfile:
     @property
     def n_request(self) -> int:
         return sum(1 for s in self.stations if s["type"] == "R")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  TRAIN SIMULATOR
@@ -875,8 +882,6 @@ class TrainSimulator:
             arrival_times  = arrival_times
         )
 
-
-# STREAMLIT_CHUNK:Building the PDF/ZIP Chart Generators...
 # ─────────────────────────────────────────────────────────────────────────────
 #  CHART EXPORT & GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1540,7 +1545,6 @@ def generate_zip_download() -> bytes:
     return buf.getvalue()
 
 
-# STREAMLIT_CHUNK:Building the Streamlit Page Configuration...
 # ─────────────────────────────────────────────────────────────────────────────
 #  STREAMLIT APP
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1581,7 +1585,6 @@ if isinstance(st.session_state.via_ops, list):
     st.session_state.via_ops = {}
 
 
-# STREAMLIT_CHUNK:Building the Sidebar inputs...
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🚆 DYPOD Simulator")
@@ -1840,7 +1843,6 @@ with st.sidebar:
     else:
         st.button("📦 Download All Results (ZIP)", disabled=True, use_container_width=True)
 
-# STREAMLIT_CHUNK:Building the execution actions...
 # ─── Actions ─────────────────────────────────────────────────────────────────
 if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
     st.session_state.rebuild_profile = False
@@ -1907,8 +1909,6 @@ if btn_run and st.session_state.profile_df is not None:
                 hist_leg, snames_leg, stats_leg = sim.run(track_leg, stop_mode=stop_mode, stop_prob=stop_prob, dwell=dwell, record=True)
                 _, _, stats_worst_leg = sim.run(track_leg, stop_mode="all", stop_prob=1.0, dwell=dwell, record=False)
 
-                # We need to map the actual OP keys (CRD codes) into the leg result for validation lookup
-                # The train stop logic records by string name, we need to associate the OP nodes
                 sops_leg = []
                 for sname in snames_leg:
                     matched_op = df_leg[df_leg["station_name"] == sname]["op_id"].iloc[0] if not df_leg[df_leg["station_name"] == sname].empty else ""
@@ -2058,7 +2058,6 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
             if pb is not None: pb.empty()
             st.error(str(e))
 
-# STREAMLIT_CHUNK:Building the application tabs...
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 tab_prof, tab_edit, tab_run_t, tab_mc_t = st.tabs([
     "🗺️ Infrastructure Limits", "✏️ Profile Editor", "▶️ Kinematic Simulation", "🎲 Monte Carlo",
@@ -2150,7 +2149,7 @@ with tab_prof:
             st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
                             use_container_width=True, key="route_map_tab1", config=get_chart_config(f"{get_base_filename()}_RouteMap"))
 
-    # Speed summary table (pure Plotly — no matplotlib)
+    # Speed summary table
     with st.expander("⚡ Speed & electrification summary"):
         spd_df = df[["cum_km","station_name","stop_type","speed_kmh",
                       "gradient_perm","electrification","n_tracks"]].copy()
@@ -2174,7 +2173,7 @@ with tab_prof:
                         fill_color=[["#F8FAFC"]*len(spd_df), ["#F8FAFC"]*len(spd_df),
                                     [_sclr(v) for v in spd_df["speed_kmh"]],
                                     ["#F8FAFC"]*len(spd_df),
-                                    ["#F8FAFC"]*len(spd_df),  # Safe solid color
+                                    ["#F8FAFC"]*len(spd_df),
                                     ["#F8FAFC"]*len(spd_df)],
                         font=dict(size=11), align="left", height=24)))
         fig_tbl.update_layout(height=min(60+len(spd_df)*26,440),
@@ -2276,14 +2275,12 @@ with tab_edit:
                     unsafe_allow_html=True)
 
     if df is not None:
-        # Map
         st.markdown('<div class="sec">🗺️ Route Map</div>', unsafe_allow_html=True)
         map_df2 = df.dropna(subset=["lat","lon"])
         if not map_df2.empty:
             st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
                             use_container_width=True, key="route_map_tab2", config=get_chart_config(f"{get_base_filename()}_RouteMap2"))
 
-        # Override table
         st.markdown('<div class="sec">📝 Speed, Stop & Electrification Overrides</div>', unsafe_allow_html=True)
         st.caption("Edit speed limits, stop types, or electrification directly. Changes apply to the simulation only.")
         edit_cols = ["station_name","stop_type","speed_kmh","gradient_perm","electrification","length_m"]
@@ -2304,7 +2301,6 @@ with tab_edit:
             updated["electrification"] = edited["electrification"].values
             updated["recuperation"] = updated["electrification"].apply(lambda x: 0 if x == "NONE" else 1)
 
-            # Recalculate the non-electrified gap ahead for the coasting physics engine
             if "ue_gap_m" in updated.columns:
                 ue_gap_ahead = []
                 for i in range(len(updated)):
@@ -2326,7 +2322,6 @@ with tab_edit:
         st.info("Build a track profile first (sidebar → **Build Track Profile**).")
 
 
-# STREAMLIT_CHUNK:Building the Kinematic Validation dashboard...
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TAB 3 – KINEMATIC SIMULATION (REPRESENTATIVE RUN)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2336,7 +2331,6 @@ with tab_run_t:
         st.info("👈 Build a profile, then click **▶️ Run** in the sidebar.")
         st.stop()
 
-    # Fallback to handle cached sessions that lack the newer multi-leg dictionary keys
     legs_data   = rep.get("leg_results", [])
     total_stats = rep.get("total_stats", rep.get("stats", {}))
     total_net_w = rep.get("total_net_worst", total_stats.get("net_kwh", 0.0))
@@ -2370,7 +2364,6 @@ with tab_run_t:
 
     kc2[3].markdown(kpi_card(f"{total_stats.get('regen_kwh', 0):.1f}", "Total Recuperated [kWh]"), unsafe_allow_html=True)
 
-    # Safely compute total stops
     total_stops = sum(len(l.get("snames", [])) for l in legs_data)
     if not legs_data and "stop_names" in rep:
         total_stops = len(rep["stop_names"])
@@ -2378,7 +2371,6 @@ with tab_run_t:
     kc2[4].markdown(kpi_card(str(total_stops), "Total Stops Served"), unsafe_allow_html=True)
     st.write("---")
 
-    # Handle legacy single-leg runs visually gracefully
     if not legs_data and "hist" in rep:
         legs_data = [{
             "leg_num": 1,
@@ -2441,7 +2433,6 @@ with tab_run_t:
 
                 start_st = leg.get("start_name", "")
                 if start_st and snames_exec and snames_exec[0] != start_st:
-                    # Sync missing origin names/ops if dropped by validation
                     snames_exec = [start_st] + snames_exec
                     sops_exec = [terminals[leg.get("leg_num", 1)-1]] + sops_exec
 
@@ -2449,25 +2440,10 @@ with tab_run_t:
                 prev_dep_time = 0.0
                 tt_db = st.session_state.get("timetable_db", {})
 
-                def normalize_name(n: str) -> str:
-                    if not n: return ""
-                    n = n.lower().replace("-", " ")
-                    replacements = [
-                        (" zastávka", ""), (" hl.n.", ""), (" hlavní nádraží", ""),
-                        (" dvorana", ""), (" město", ""), (" z", ""),
-                        ("n. ", "nad "), ("p. ", "pod "), ("u ", "u "),
-                        ("ostr.", "ostravicí"), ("frýdl.", "frýdlant"),
-                        (".", " ")
-                    ]
-                    for bad, good in replacements:
-                        n = n.replace(bad, good)
-                    return " ".join(n.split())
-
                 for i in range(len(snames_exec) - 1):
                     st_a, st_b = snames_exec[i], snames_exec[i+1]
                     op_a, op_b = sops_exec[i], sops_exec[i+1]
 
-                    # Extract the absolute CRD/SR70 Codes derived from the railML infrastructure elements
                     sr70_a = "".join(filter(str.isdigit, parser.op_info.get(op_a, {}).get("sr70", "")))
                     sr70_b = "".join(filter(str.isdigit, parser.op_info.get(op_b, {}).get("sr70", "")))
 
@@ -2492,15 +2468,8 @@ with tab_run_t:
 
                         # Priority 3: Fuzzy Normalized String Fallback
                         if sched_s is None:
-                            sched_s = tt_db.get((normalize_name(st_a), normalize_name(st_b)))
+                            sched_s = tt_db.get((normalize_station_name(st_a), normalize_station_name(st_b)))
                             if sched_s is not None: src = "CZPTT (Fuzzy Name)"
-
-                        # Priority 4: Super-fuzzy (first 5 characters) Fallback
-                        if sched_s is None:
-                            n_a, n_b = normalize_name(st_a), normalize_name(st_b)
-                            if len(n_a) >= 5 and len(n_b) >= 5:
-                                sched_s = tt_db.get((n_a[:5], n_b[:5]))
-                                if sched_s is not None: src = "CZPTT (Super-Fuzzy 5char)"
 
                     if sched_s is None:
                         sched_s = sim_s * 1.12
@@ -2522,7 +2491,6 @@ with tab_run_t:
         st.markdown("<hr>", unsafe_allow_html=True)
 
 
-# STREAMLIT_CHUNK:Building the Monte Carlo execution and layout...
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TAB 4 – MONTE CARLO
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2623,7 +2591,6 @@ with tab_mc_t:
             st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Tradeoff_{key_prefix}"))
 
         st.markdown("<hr>", unsafe_allow_html=True)
-
 
     render_mc_dashboard(mc_overall, "Overall Scenario (Total Itinerary)", route_n, "overall")
 
