@@ -712,9 +712,10 @@ class TrainSimulator:
                 stop_names.append(st["name"])
 
         # Train MUST ALWAYS stop at the final destination
-        if track.total_km > 0.0:
-            stops_km.append(track.total_km)
-            stop_names.append("Destination")
+        if track.total_km > 0.0 and track.stations:
+            final_st = track.stations[-1]
+            stops_km.append(final_st["km"])
+            stop_names.append(final_st["name"])
 
         v = dist = e_j = r_j = t_s = 0.0
         hist = {k: [] for k in ("time_s", "km", "v_kmh", "v_limit_kmh",
