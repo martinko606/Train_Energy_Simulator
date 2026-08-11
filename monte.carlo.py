@@ -15,7 +15,7 @@ DYPOD Track Profile Builder & Fleet Energy Simulator — Combined Edition
 • Kinematic chart with time/distance X-axis toggle, gradient ribbon & station annotations
 • Monte Carlo stochastic stop-probability analysis with progress bar
 • High-res 400 DPI Chart Exports & Bulk Zip Data Downloader
-• Offline CZPTT Timetable Validation & CRD mapping with Semantic Fuzzing
+• Offline CZPTT Timetable Validation & CRD mapping (with effective speed limits)
 Run:  streamlit run app.py
 """
 from __future__ import annotations
@@ -29,8 +29,6 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 import difflib
-import re
-import unicodedata
 
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
@@ -65,31 +63,27 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS & DATA EXTRACTORS
 # ─────────────────────────────────────────────────────────────────────────────
-def super_normalize(n: str) -> str:
-    """Semantic abbreviation expansion to prevent string collisions on Czech station names."""
-    if not n: return ""
-    n = n.lower().replace("-", " ")
-    # Strip accents for baseline comparison
-    n = "".join(c for c in unicodedata.normalize('NFD', n) if unicodedata.category(c) != 'Mn')
-
-    words = n.split()
-    out = []
-    for w in words:
-        if w in ["z", "z.", "zast", "zast.", "zastavka"]: out.append("zastavka")
-        elif w in ["n", "n."]: out.append("nad")
-        elif w in ["p", "p."]: out.append("pod")
-        elif w in ["u", "u."]: out.append("u")
-        elif w in ["mesto", "m."]: out.append("mesto")
-        elif w in ["hl.n.", "hl.n", "hl", "hl."]: out.append("hlavni")
-        elif w in ["ahr", "nz", "odb", "odb.", "vyh", "vyh.", "dvorana"]: continue
-        else: out.append(re.sub(r'[^a-z]', '', w))
-
-    return " ".join(filter(None, out))
-
 @st.cache_data(ttl=86400, show_spinner=False)
 def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
-    segment_times_crd = {}
-    segment_times_name = {}
+    segment_times = {}
+
+    def super_normalize(n: str) -> str:
+        if not n: return ""
+        n = n.lower().replace("-", " ")
+        # Semantic Expansion: Convert abbreviations to full topological words
+        replacements = {
+            " z ": " zastavka ", " z.": " zastavka", " zast.": " zastavka", " zast ": " zastavka ",
+            " n.": " nad ", " p.": " pod ", " hl.n.": " hlavni nadrazi"
+        }
+        for k, v in replacements.items():
+            n = n.replace(k, v)
+        # Erasure: Strip operational noise that messes up physical geography matching
+        for noise in ["ahr", "nz", "odb", "vyh", "zastavka", "hlavni nadrazi"]:
+            n = n.replace(noise, "")
+        # Remove floating dots and smash into a phonetic fingerprint
+        n = n.replace(".", " ")
+        words = [w for w in n.split() if len(w) > 1] # drop floating single initials like r, s, n
+        return " ".join(words).strip()
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
         xml_files = [n for n in zf.namelist() if n.lower().endswith(('.xml', '.railml'))]
@@ -137,21 +131,21 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                             code_b, name_b, arr_b, _ = route[j]
                             delta = arr_b - dep_a
                             if delta > 0:
-                                # Priority 1: Map exact CRD Codes securely
+                                # Priority 1: Map exact CRD Codes
                                 if code_a and code_b:
                                     pair = (code_a, code_b)
-                                    if pair not in segment_times_crd or delta < segment_times_crd[pair]:
-                                        segment_times_crd[pair] = delta
+                                    if pair not in segment_times or delta < segment_times[pair]:
+                                        segment_times[pair] = delta
 
-                                # Priority 2: Map highly robust semantic string names
+                                # Priority 2: Semantic Universal Fingerprint
                                 norm_a, norm_b = super_normalize(name_a), super_normalize(name_b)
                                 if norm_a and norm_b:
                                     pair_norm = (norm_a, norm_b)
-                                    if pair_norm not in segment_times_name or delta < segment_times_name[pair_norm]:
-                                        segment_times_name[pair_norm] = delta
+                                    if pair_norm not in segment_times or delta < segment_times[pair_norm]:
+                                        segment_times[pair_norm] = delta
                 except Exception:
                     pass
-    return {"crd": segment_times_crd, "name": segment_times_name}
+    return segment_times
 
 def clean_name(name: str) -> str:
     if pd.isna(name) or not name: return "Unknown"
@@ -222,14 +216,6 @@ def load_xml_from_upload(uploaded) -> str | None:
     with open(path, "wb") as f:
         f.write(uploaded.read())
     return path
-
-def _spd_cell_color(v):
-    lo, hi = 30.0, 160.0
-    t = max(0.0, min(1.0, (float(v) - lo) / (hi - lo)))
-    r = int(220 * (1 - t) + 34 * t)
-    g = int(38  * (1 - t) + 197 * t)
-    b = int(38  * (1 - t) + 94 * t)
-    return f"rgba({r},{g},{b},0.25)"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -729,7 +715,7 @@ class TrainSimulator:
             stop_names.append(final_st["name"])
 
         v = dist = e_j = r_j = t_s = 0.0
-        hist = {k: [] for k in ("time_s", "km", "v_kmh", "v_limit_kmh",
+        hist = {k: [] for k in ("time_s", "km", "v_kmh", "v_limit_kmh", "track_limit_kmh",
                                  "gross_kwh", "regen_kwh", "net_kwh", "grad")} if record else None
         arrival_times = {}
 
@@ -746,7 +732,8 @@ class TrainSimulator:
             km       = dist / 1000.0
             rear_km  = max(0.0, km - self.length_m / 1000.0)
             seg      = track.seg_at(km)
-            v_lim    = min(track.v_limit_span(km, rear_km), self.max_v)
+            vl_front_raw = track.v_limit_span(km, rear_km)
+            v_lim    = min(vl_front_raw, self.max_v)
             slope    = seg.get("grad", 0.0)
             electr   = seg.get("electrification", "NONE")
             recup_ok = seg.get("recuperation", 0) == 1
@@ -777,11 +764,11 @@ class TrainSimulator:
                 max_safe = min(max_safe, math.sqrt(max(0.0, 2.0 * eff_decel * d2s)))
 
             if hist is not None:
-                vl_front = min(track.v_limit_span(km, km), self.max_v)
                 hist["time_s"].append(t_s)
                 hist["km"].append(km)
                 hist["v_kmh"].append(v * 3.6)
-                hist["v_limit_kmh"].append(vl_front * 3.6)
+                hist["track_limit_kmh"].append(track.v_limit_span(km, km) * 3.6)
+                hist["v_limit_kmh"].append(min(track.v_limit_span(km, km), self.max_v) * 3.6)
                 hist["gross_kwh"].append(e_j / 3_600_000.0)
                 hist["regen_kwh"].append(r_j / 3_600_000.0)
                 hist["net_kwh"].append((e_j - r_j) / 3_600_000.0)
@@ -831,11 +818,11 @@ class TrainSimulator:
 
                 if hist is not None:
                     for pass_no in range(2):
-                        vl = min(track.v_limit_span(km, km), self.max_v) * 3.6
                         hist["time_s"].append(t_s)
                         hist["km"].append(km)
                         hist["v_kmh"].append(0.0)
-                        hist["v_limit_kmh"].append(vl)
+                        hist["track_limit_kmh"].append(track.v_limit_span(km, km) * 3.6)
+                        hist["v_limit_kmh"].append(min(track.v_limit_span(km, km), self.max_v) * 3.6)
                         hist["gross_kwh"].append(e_j / 3_600_000.0)
                         hist["regen_kwh"].append(r_j / 3_600_000.0)
                         hist["net_kwh"].append((e_j - r_j) / 3_600_000.0)
@@ -870,7 +857,7 @@ class TrainSimulator:
 # ─────────────────────────────────────────────────────────────────────────────
 #  CHART EXPORT & GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
-def make_profile_chart(df: pd.DataFrame) -> go.Figure:
+def make_profile_chart(df: pd.DataFrame, vehicle_max_speed: float = None) -> go.Figure:
     total_km = float(df["cum_km"].max())
 
     mid_km, seg_widths = [], []
@@ -885,7 +872,7 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
 
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
-        subplot_titles=("Statutory Track Speed Limit [km/h]",
+        subplot_titles=("Speed Limits [km/h]",
                         "Gradient [‰]  (↑ uphill  ↓ downhill)",
                         "Electrification"),
         row_heights=[0.48, 0.32, 0.20], vertical_spacing=0.055,
@@ -898,31 +885,49 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
         stype = str(row.get("stop_type", "")).strip()
         tag = f"<b>{nm}</b><br>" if nm and nm != "nan" else ""
         stop_tag = {"X": " 🚉", "R": " 🛑"}.get(stype, "")
+        eff_spd = min(row['speed_kmh'], vehicle_max_speed) if vehicle_max_speed else row['speed_kmh']
         hover_txt.append(
             f"{tag}km {row['cum_km']:.2f}{stop_tag}<br>"
-            f"{row['speed_kmh']:.0f} km/h<br>"
+            f"Track: {row['speed_kmh']:.0f} km/h<br>"
+            f"Effective: {eff_spd:.0f} km/h<br>"
             f"Grad: {row['gradient_perm']:.1f} ‰<br>"
             f"{row['electrification']}<extra></extra>"
         )
 
+    # Grey background trace for Track Limit
     fig.add_trace(go.Scatter(
         x=df["cum_km"], y=df["speed_kmh"],
-        mode="lines", name="Statutory Limit",
+        mode="lines", name="Track Limit",
+        line=dict(color=C["grey"], width=1.5, shape="hv", dash="dot"),
+        hovertemplate=hover_txt,
+    ), row=1, col=1)
+
+    # Blue filled trace for Effective Limit
+    eff_y = df["speed_kmh"].clip(upper=vehicle_max_speed) if vehicle_max_speed else df["speed_kmh"]
+    fig.add_trace(go.Scatter(
+        x=df["cum_km"], y=eff_y,
+        mode="lines", name="Effective Limit",
         line=dict(color=C["primary"], width=2.5, shape="hv"),
         fill="tozeroy", fillcolor=C["bg_blue"],
         hovertemplate=hover_txt,
     ), row=1, col=1)
 
+    if vehicle_max_speed:
+        fig.add_hline(y=vehicle_max_speed, line_dash="dash", line_color=C["accent"],
+                      annotation_text=f" Vehicle Max ({vehicle_max_speed} km/h)",
+                      annotation_position="top left", row=1, col=1)
+
     spd_changes = df[df["speed_kmh"].diff().abs() > 0.5].copy()
     if not spd_changes.empty:
+        y_val = spd_changes["speed_kmh"].clip(upper=vehicle_max_speed) if vehicle_max_speed else spd_changes["speed_kmh"]
         fig.add_trace(go.Scatter(
-            x=spd_changes["cum_km"], y=spd_changes["speed_kmh"],
+            x=spd_changes["cum_km"], y=y_val,
             mode="markers",
             marker=dict(symbol="line-ns", size=12, color=C["primary"],
                         line=dict(color=C["primary"], width=2)),
             name="Speed change",
             showlegend=False,
-            hovertemplate="km %{x:.2f}<br><b>%{y:.0f} km/h</b><extra></extra>",
+            hovertemplate="km %{x:.2f}<br><b>Limit change</b><extra></extra>",
         ), row=1, col=1)
 
     n_x = max(len(stops_x), 1)
@@ -931,30 +936,33 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
     unlabelled_x = stops_x[~stops_x.index.isin(labelled_x.index)]
 
     if not labelled_x.empty:
+        y_val = labelled_x["speed_kmh"].clip(upper=vehicle_max_speed) if vehicle_max_speed else labelled_x["speed_kmh"]
         fig.add_trace(go.Scatter(
-            x=labelled_x["cum_km"], y=labelled_x["speed_kmh"],
+            x=labelled_x["cum_km"], y=y_val,
             mode="markers+text",
             marker=dict(symbol="diamond", size=9, color=C["accent"], line=dict(color="white", width=1.5)),
             text=labelled_x["station_name"], textposition="top center", textfont=dict(size=7, color=C["dark"]),
-            name="Station (X)", hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+            name="Station (X)", hovertemplate="<b>%{text}</b><br>km %{x:.2f}<extra></extra>",
         ), row=1, col=1)
 
     if not unlabelled_x.empty:
+        y_val = unlabelled_x["speed_kmh"].clip(upper=vehicle_max_speed) if vehicle_max_speed else unlabelled_x["speed_kmh"]
         fig.add_trace(go.Scatter(
-            x=unlabelled_x["cum_km"], y=unlabelled_x["speed_kmh"],
+            x=unlabelled_x["cum_km"], y=y_val,
             mode="markers",
             marker=dict(symbol="diamond", size=6, color=C["accent"], line=dict(color="white", width=1)),
             showlegend=False, text=unlabelled_x["station_name"],
-            hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+            hovertemplate="<b>%{text}</b><br>km %{x:.2f}<extra></extra>",
         ), row=1, col=1)
 
     if not stops_r.empty:
+        y_val = stops_r["speed_kmh"].clip(upper=vehicle_max_speed) if vehicle_max_speed else stops_r["speed_kmh"]
         fig.add_trace(go.Scatter(
-            x=stops_r["cum_km"], y=stops_r["speed_kmh"],
+            x=stops_r["cum_km"], y=y_val,
             mode="markers",
             marker=dict(symbol="circle", size=7, color=C["yellow"], line=dict(color="white", width=1)),
             name="Halt (R)", text=stops_r["station_name"],
-            hovertemplate="<b>%{text}</b><br>km %{x:.2f}  %{y:.0f} km/h<extra></extra>",
+            hovertemplate="<b>%{text}</b><br>km %{x:.2f}<extra></extra>",
         ), row=1, col=1)
 
     # ── Gradient — Solid Bar Fill to eliminate Plotly 0-crossover bugs
@@ -990,6 +998,10 @@ def make_profile_chart(df: pd.DataFrame) -> go.Figure:
     spd_max = float(df["speed_kmh"].max())
     spd_lo  = max(0, spd_min * 0.75)
     spd_hi  = spd_max * 1.25
+
+    if vehicle_max_speed:
+        spd_lo = min(spd_lo, max(0, vehicle_max_speed * 0.75))
+        spd_hi = max(spd_hi, vehicle_max_speed * 1.1)
 
     fig.update_xaxes(title_text="Distance from departure [km]", row=3, col=1, gridcolor=C["light"])
     fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1, gridcolor=C["light"], range=[spd_lo, spd_hi])
@@ -1166,7 +1178,11 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
     # 1. SPEED CHART
     fig_speed = go.Figure()
-    fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Speed Limit",
+    if "track_limit_kmh" in hist:
+        fig_speed.add_trace(go.Scatter(x=x_data, y=hist["track_limit_kmh"], name="Track Limit",
+                                       line=dict(color=C["grey"], dash="dot", width=1.5, shape="hv")))
+
+    fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_limit_kmh"], name="Effective Limit",
                                    line=dict(color=C["red"], dash="dot", width=1.8, shape="hv")))
     fig_speed.add_trace(go.Scatter(x=x_data, y=hist["v_kmh"], name="Actual Speed",
                                    line=dict(color=C["primary"], width=2.5),
@@ -1659,7 +1675,7 @@ with st.sidebar:
             with st.spinner("Extracting CZPTT Database..."):
                 tt_db = parse_czptt_timetable_from_bytes(tt_bytes)
             st.session_state["timetable_db"] = tt_db
-            st.success(f"✅ Loaded {len(tt_db.get('crd', {})):,} schedule segments.")
+            st.success(f"✅ Loaded {len(tt_db):,} schedule segments.")
         except Exception as e:
             st.error(f"Error parsing timetable: {e}")
 
@@ -1894,6 +1910,7 @@ if btn_run and st.session_state.profile_df is not None:
                 hist_leg, snames_leg, stats_leg = sim.run(track_leg, stop_mode=stop_mode, stop_prob=stop_prob, dwell=dwell, record=True)
                 _, _, stats_worst_leg = sim.run(track_leg, stop_mode="all", stop_prob=1.0, dwell=dwell, record=False)
 
+                # Map OP keys
                 sops_leg = []
                 for sname in snames_leg:
                     matched_op = df_leg[df_leg["station_name"] == sname]["op_id"].iloc[0] if not df_leg[df_leg["station_name"] == sname].empty else ""
@@ -2056,6 +2073,7 @@ with tab_prof:
     df  = st.session_state.profile_df
     ea  = st.session_state.elec_analysis
     cs  = st.session_state.comp_sys
+    vehicle_max_spd = st.session_state.get("sim_inputs", {}).get("Max Speed (km/h)", 160)
 
     if df is None:
         st.markdown("### 👈 Configure your Route/Scenario in the sidebar and click **Build Track Profile**")
@@ -2074,6 +2092,7 @@ with tab_prof:
 
     st.markdown(f"### 📍 {sn}  →  {en}")
 
+    # Electrification alerts
     if ea is not None and traction == "ELECTRIC":
         ue = ea.get("normal_ue_km", ea.get("incomp_km", 0.0))
         gw = ea.get("gateway_km", 0.0)
@@ -2095,11 +2114,12 @@ with tab_prof:
         elif ue > 0:
             st.markdown(f'<div class="danger-box">🚫 <b>{ue:.1f} km incompatible track</b> exceeds coasting limit ({coast_lbl}). Raise limit, use diesel, or choose different stations.</div>', unsafe_allow_html=True)
 
+    # KPI row
     kc = st.columns(6)
     kc[0].markdown(kpi_card(f"{total_km:.1f} km",       "Route length"),            unsafe_allow_html=True)
     kc[1].markdown(kpi_card(str(len(stops_x)),           "Mandatory stops (X)"),    unsafe_allow_html=True)
     kc[2].markdown(kpi_card(str(len(stops_r)),           "Request halts (R)"),      unsafe_allow_html=True)
-    kc[3].markdown(kpi_card(f"{df['speed_kmh'].max():.0f} km/h", "Max speed"),      unsafe_allow_html=True)
+    kc[3].markdown(kpi_card(f"{df['speed_kmh'].max():.0f} km/h", "Max track speed"),      unsafe_allow_html=True)
     kc[4].markdown(kpi_card(f"{df['gradient_perm'].abs().max():.0f} ‰", "Max gradient"), unsafe_allow_html=True)
 
     if traction == "ELECTRIC":
@@ -2111,8 +2131,9 @@ with tab_prof:
 
     st.write("")
 
-    st.plotly_chart(make_profile_chart(df), use_container_width=True, key="profile_chart_tab1", config=get_chart_config(f"{get_base_filename()}_TrackProfile"))
+    st.plotly_chart(make_profile_chart(df, vehicle_max_speed=vehicle_max_spd), use_container_width=True, key="profile_chart_tab1", config=get_chart_config(f"{get_base_filename()}_TrackProfile"))
 
+    # Electrification legend badges
     badges = ""
     for sys in df["electrification"].unique():
         col   = elec_color(sys)
@@ -2124,16 +2145,20 @@ with tab_prof:
     st.markdown(badges, unsafe_allow_html=True)
     st.write("")
 
+    # Route map
     map_df = df.dropna(subset=["lat","lon"])
     if not map_df.empty:
         with st.expander("🗺️ Route map", expanded=True):
             st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
                             use_container_width=True, key="route_map_tab1", config=get_chart_config(f"{get_base_filename()}_RouteMap"))
 
+    # Speed summary table
     with st.expander("⚡ Speed & electrification summary"):
         spd_df = df[["cum_km","station_name","stop_type","speed_kmh",
                       "gradient_perm","electrification","n_tracks"]].copy()
         spd_df = spd_df[spd_df["station_name"].str.strip().ne("")].reset_index(drop=True)
+        spd_df["eff_speed"] = spd_df["speed_kmh"].clip(upper=vehicle_max_spd)
+
         def _sclr(v):
             lo,hi=30.0,200.0; t=max(0.0,min(1.0,(float(v)-lo)/(hi-lo)))
             r=int(220*(1-t)+34*t); g=int(38*(1-t)+197*t); b=int(38*(1-t)+94*t)
@@ -2142,16 +2167,18 @@ with tab_prof:
         labels = icons + " " + spd_df["station_name"].str.strip()
 
         fig_tbl = go.Figure(go.Table(
-            columnwidth=[55,200,80,70,160,70],
-            header=dict(values=["km","Waypoint","Speed [km/h]","Grad [‰]","Electrif.","Tracks"],
+            columnwidth=[55,200,80,80,70,160,70],
+            header=dict(values=["km","Waypoint","Track Spd","Eff. Spd","Grad [‰]","Electrif.","Tracks"],
                         fill_color=C["dark"], font=dict(color="white",size=12),
                         align="left", height=28),
             cells=dict(values=[spd_df["cum_km"].round(2), labels,
                                 spd_df["speed_kmh"].astype(int),
+                                spd_df["eff_speed"].astype(int),
                                 spd_df["gradient_perm"].round(1),
                                 spd_df["electrification"], spd_df["n_tracks"]],
                         fill_color=[["#F8FAFC"]*len(spd_df), ["#F8FAFC"]*len(spd_df),
-                                    [_sclr(v) for v in spd_df["speed_kmh"]],
+                                    ["#F8FAFC"]*len(spd_df),
+                                    [_sclr(v) for v in spd_df["eff_speed"]],
                                     ["#F8FAFC"]*len(spd_df),
                                     ["#F8FAFC"]*len(spd_df),
                                     ["#F8FAFC"]*len(spd_df)],
@@ -2160,12 +2187,13 @@ with tab_prof:
                                margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig_tbl, use_container_width=True, key="speed_table_tab1", config=get_chart_config(f"{get_base_filename()}_SpeedSummary"))
 
+    # Full data table
     with st.expander("📋 Full profile data table"):
         cols=["cum_km","station_name","stop_type","speed_kmh","gradient_perm",
               "electrification","recuperation","length_m","n_tracks"]
         cols=[c for c in cols if c in df.columns]
         ren=dict(cum_km="km [km]",station_name="Waypoint",stop_type="Stop",
-                 speed_kmh="Speed [km/h]",gradient_perm="Grad [‰]",
+                 speed_kmh="Track Limit [km/h]",gradient_perm="Grad [‰]",
                  electrification="Electrif.",recuperation="Recup.",
                  length_m="Length [m]",n_tracks="Tracks")
         st.dataframe(df[cols].rename(columns=ren), use_container_width=True,
@@ -2182,6 +2210,7 @@ with tab_edit:
     st.markdown("### ✏️ Interactive Profile Editor")
     df = st.session_state.profile_df
 
+    # Via waypoints
     st.markdown('<div class="sec">📍 Manual Routing Waypoints</div>', unsafe_allow_html=True)
 
     terminals = st.session_state.get("scenario_terminals", [])
@@ -2219,7 +2248,7 @@ with tab_edit:
                 st.rerun()
 
     if any(st.session_state.via_ops.values()):
-        st.markdown("**Manual waypoints:**")
+        st.markdown("**Manual routing waypoints:**")
         for leg_idx in sorted(st.session_state.via_ops.keys()):
             if not st.session_state.via_ops.get(leg_idx):
                 continue
@@ -2249,16 +2278,18 @@ with tab_edit:
             st.session_state.rebuild_profile = True
             st.rerun()
     else:
-        st.markdown('<div class="info-box">No manual waypoints. Router uses direct shortest path.</div>',
+        st.markdown('<div class="info-box">No manual waypoints. Router uses direct shortest path for each leg.</div>',
                     unsafe_allow_html=True)
 
     if df is not None:
+        # Map
         st.markdown('<div class="sec">🗺️ Route Map</div>', unsafe_allow_html=True)
         map_df2 = df.dropna(subset=["lat","lon"])
         if not map_df2.empty:
             st.plotly_chart(make_route_map(df, st.session_state.combined_vias or [], parser),
                             use_container_width=True, key="route_map_tab2", config=get_chart_config(f"{get_base_filename()}_RouteMap2"))
 
+        # Override table
         st.markdown('<div class="sec">📝 Speed, Stop & Electrification Overrides</div>', unsafe_allow_html=True)
         st.caption("Edit speed limits, stop types, or electrification directly. Changes apply to the simulation only.")
         edit_cols = ["station_name","stop_type","speed_kmh","gradient_perm","electrification","length_m"]
@@ -2279,6 +2310,7 @@ with tab_edit:
             updated["electrification"] = edited["electrification"].values
             updated["recuperation"] = updated["electrification"].apply(lambda x: 0 if x == "NONE" else 1)
 
+            # Recalculate the non-electrified gap ahead for the coasting physics engine
             if "ue_gap_m" in updated.columns:
                 ue_gap_ahead = []
                 for i in range(len(updated)):
@@ -2370,6 +2402,7 @@ with tab_run_t:
 
         leg_snames = leg.get("snames", [])
         total_possible = leg.get("total_possible_stops", len(leg_snames))
+
         st.markdown(f"**Stops served ({len(leg_snames)} / {total_possible}):** " + ("  →  ".join(f"*{s}*" for s in leg_snames) if leg_snames else "None"))
 
         leg_stats = leg.get("stats", {})
@@ -2388,8 +2421,11 @@ with tab_run_t:
         lk2.metric(f"Consumed [{unit_lbl}]", f"{leg_cons:.1f}")
         lk3.metric(f"Saved [{unit_lbl}]", f"{leg_saved:.1f}")
         lk4.metric("Avg Speed", f"{leg_avg_spd:.1f} km/h")
-        if _tr == "DIESEL": lk5.metric(f"Specific Fuel", f"{leg_cons/leg_dist*1000:.1f} mL/km" if leg_dist > 0 else "0.0")
-        else: lk5.metric(f"Specific Energy", f"{leg_stats.get('net_kwh', 0)/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
+
+        if _tr == "DIESEL":
+            lk5.metric(f"Specific Fuel", f"{leg_cons/leg_dist*1000:.1f} mL/km" if leg_dist > 0 else "0.0")
+        else:
+            lk5.metric(f"Specific Energy", f"{leg_stats.get('net_kwh', 0)/leg_dist:.3f} kWh/km" if leg_dist > 0 else "0.0")
 
         if leg.get("hist"):
             fig_s, fig_g, fig_e = make_kinematic_charts(leg["hist"], leg_snames, df_leg_ref, x_axis=x_axis_choice)
@@ -2415,7 +2451,7 @@ with tab_run_t:
                     snames_exec = [start_st] + snames_exec
                     sops_exec = [terminals[leg.get("leg_num", 1)-1]] + sops_exec
 
-                # --- Filtering Logic ---
+                # --- NEW FILTERING LOGIC ---
                 if val_mode == "Major Stations Only (Blocks)":
                     major_ops = set(df_leg_ref[df_leg_ref["stop_type"] == "X"]["op_id"].tolist())
                     if sops_exec:
@@ -2436,9 +2472,32 @@ with tab_run_t:
 
                 rows = []
                 tt_db = st.session_state.get("timetable_db", {})
-                crd_pairs = tt_db.get("crd", {}) if isinstance(tt_db, dict) else {}
-                norm_pairs = tt_db.get("name", {}) if isinstance(tt_db, dict) else {}
-                known_norms = list(set([station for pair in norm_pairs.keys() for station in pair]))
+
+                def super_normalize(n: str) -> str:
+                    if not n: return ""
+                    n = n.lower().replace("-", " ")
+                    replacements = {
+                        " z ": " zastavka ", " z.": " zastavka", " zast.": " zastavka", " zast ": " zastavka ",
+                        " n.": " nad ", " p.": " pod ", " hl.n.": " hlavni nadrazi"
+                    }
+                    for k, v in replacements.items():
+                        n = n.replace(k, v)
+                    for noise in ["ahr", "nz", "odb", "vyh", "zastavka", "hlavni nadrazi"]:
+                        n = n.replace(noise, "")
+                    n = n.replace(".", " ")
+                    words = [w for w in n.split() if len(w) > 1]
+                    return " ".join(words).strip()
+
+                crd_pairs = {}
+                norm_pairs = {}
+                known_norms = []
+                for k, v in tt_db.items():
+                    if isinstance(k[0], str) and k[0].isdigit():
+                        crd_pairs[k] = v
+                    else:
+                        norm_pairs[k] = v
+                        known_norms.extend(list(k))
+                known_norms = list(set(known_norms))
 
                 for i in range(len(snames_exec) - 1):
                     st_a, st_b = snames_exec[i], snames_exec[i+1]
@@ -2462,7 +2521,7 @@ with tab_run_t:
                     norm_b = super_normalize(st_b)
 
                     if tt_db:
-                        # Priority 1: Exact CRD / SR70 Code Match
+                        # Priority 1
                         if sr70_a and sr70_b:
                             if (sr70_a, sr70_b) in crd_pairs:
                                 sched_s = crd_pairs[(sr70_a, sr70_b)]
@@ -2471,7 +2530,7 @@ with tab_run_t:
                                 sched_s = crd_pairs[(sr70_b, sr70_a)]
                                 src = "CZPTT (CRD Reverse Dir)"
 
-                        # Priority 2: Universal Name Fingerprint
+                        # Priority 2
                         if sched_s is None:
                             if (norm_a, norm_b) in norm_pairs:
                                 sched_s = norm_pairs[(norm_a, norm_b)]
@@ -2480,7 +2539,7 @@ with tab_run_t:
                                 sched_s = norm_pairs[(norm_b, norm_a)]
                                 src = "CZPTT (Name Reverse Dir)"
 
-                        # Priority 3: Difflib AI Fuzzy Search
+                        # Priority 3
                         if sched_s is None:
                             matches_a = difflib.get_close_matches(norm_a, known_norms, n=1, cutoff=0.45)
                             matches_b = difflib.get_close_matches(norm_b, known_norms, n=1, cutoff=0.45)
@@ -2614,7 +2673,6 @@ with tab_mc_t:
             st.plotly_chart(fig_et, use_container_width=True, key=f"tradeoff_{key_prefix}", config=get_chart_config(f"{bn_mc}_MC_Tradeoff_{key_prefix}"))
 
         st.markdown("<hr>", unsafe_allow_html=True)
-
 
     render_mc_dashboard(mc_overall, "Overall Scenario (Total Itinerary)", route_n, "overall")
 
