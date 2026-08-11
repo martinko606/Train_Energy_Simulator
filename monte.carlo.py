@@ -138,7 +138,16 @@ class DYPODParser:
                 if geo is not None and geo.get("positioningSystemRef", "") == "gps01":
                     lat, lon = float(geo.get("x", 0)), float(geo.get("y", 0)); break
             types = [x.get("operationalType", "") for x in op.iter("opOperation")]
-            self.op_info[oid] = dict(name=name, lat=lat, lon=lon, types=types)
+
+            # --- Extract absolute CRD / sr70 code for Timetable matching ---
+            sr70 = ""
+            for des in op.findall("designator"):
+                entry = des.get("entry", "")
+                if entry and entry.isdigit() and len(entry) >= 4:
+                    sr70 = entry
+                    break
+
+            self.op_info[oid] = dict(name=name, lat=lat, lon=lon, types=types, sr70=sr70)
 
     def _parse_segs(self):
         grad_map: dict[str, dict] = {}
@@ -438,6 +447,7 @@ class TrackProfile:
     def _build_stations(self) -> list[dict]:
         return [
             dict(name=str(r.get("station_name", "")), km=float(r["cum_km"]),
+                 op_id=str(r.get("op_id", "")),
                  type=str(r.get("stop_type", "")).upper())
             for _, r in self.df.iterrows()
             if str(r.get("stop_type", "")).upper() in ("X", "R")
@@ -525,6 +535,7 @@ class TrainSimulator:
 
         stops_km:   list[float] = []
         stop_names: list[str]   = []
+        stop_ops:   list[str]   = []
         stop_arrival_times: dict[str, float] = {}
 
         for st in track.stations:
@@ -542,15 +553,19 @@ class TrainSimulator:
             if will:
                 stops_km.append(km)
                 stop_names.append(st["name"])
+                stop_ops.append(st.get("op_id", ""))
 
         # Train MUST ALWAYS stop at the final destination
         if track.total_km > 0.0:
             dest_name = track.stations[-1]["name"] if track.stations else "Destination"
+            dest_op = track.stations[-1].get("op_id", "") if track.stations else ""
             stops_km.append(track.total_km)
             stop_names.append(dest_name)
+            stop_ops.append(dest_op)
 
         orig_stops_km = list(stops_km)
         orig_stop_names = list(stop_names)
+        orig_stop_ops = list(stop_ops)
 
         v = dist = e_j = r_j = t_s = 0.0
         hist = {k: [] for k in ("time_s", "km", "v_kmh", "v_limit_kmh",
@@ -648,7 +663,9 @@ class TrainSimulator:
             if v < 0.5 and any(abs(km - s) <= 0.1 for s in stops_km):
                 v = 0.0
 
-                stopped_at = next((name for s_km, name in zip(orig_stops_km, orig_stop_names) if abs(s_km - km) <= 0.1), "Unknown")
+                # Accurately identify which station we stopped at for timetable validation
+                stopped_idx = next((i for i, s_km in enumerate(orig_stops_km) if abs(s_km - km) <= 0.1), None)
+                stopped_at = orig_stop_names[stopped_idx] if stopped_idx is not None else "Unknown"
                 if stopped_at not in stop_arrival_times:
                     stop_arrival_times[stopped_at] = t_s
 
@@ -678,7 +695,7 @@ class TrainSimulator:
 
                 stops_km = [s for s in stops_km if abs(s - km) > 0.1]
 
-        return hist, stop_names, dict(
+        return hist, stop_names, stop_ops, dict(
             gross_kwh      = e_j / 3_600_000.0,
             regen_kwh      = r_j / 3_600_000.0,
             net_kwh        = (e_j - r_j) / 3_600_000.0,
@@ -708,8 +725,10 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                     route = []
                     for loc in root.iter('CZPTTLocation'):
                         name_el = loc.find('.//PrimaryLocationName')
-                        if name_el is None or not name_el.text: continue
-                        name = name_el.text.strip().lower()
+                        code_el = loc.find('.//LocationPrimaryCode')
+
+                        name = name_el.text.strip().lower() if name_el is not None and name_el.text else ""
+                        code = code_el.text.strip() if code_el is not None and code_el.text else ""
 
                         arr_time = dep_time = None
                         for timing in loc.findall('.//Timing'):
@@ -730,18 +749,26 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                         if dep_time is None and arr_time is not None: dep_time = arr_time
 
                         if arr_time is not None:
-                            route.append((name, arr_time, dep_time))
+                            route.append((code, name, arr_time, dep_time))
 
                     for i in range(len(route) - 1):
                         for j in range(i + 1, len(route)):
-                            st_a, _, dep_a = route[i]
-                            st_b, arr_b, _ = route[j]
+                            code_a, name_a, _, dep_a = route[i]
+                            code_b, name_b, arr_b, _ = route[j]
                             delta = arr_b - dep_a
                             if delta > 0:
-                                pair = (st_a, st_b)
-                                if pair not in segment_times:
-                                    segment_times[pair] = []
-                                segment_times[pair].append(delta)
+                                # Prioritize absolute CRD code matches
+                                if code_a and code_b:
+                                    pair = (code_a, code_b)
+                                    if pair not in segment_times:
+                                        segment_times[pair] = []
+                                    segment_times[pair].append(delta)
+                                # Map strings as a fallback
+                                if name_a and name_b:
+                                    pair_name = (name_a, name_b)
+                                    if pair_name not in segment_times:
+                                        segment_times[pair_name] = []
+                                    segment_times[pair_name].append(delta)
                 except Exception:
                     pass
 
@@ -1563,7 +1590,7 @@ with st.sidebar:
     st.caption("Czech railway track profile & energy analysis")
     st.markdown("---")
 
-    st.markdown('<div class="sec">📂 Load railML</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">📂 Load railML Infrastructure</div>', unsafe_allow_html=True)
     uploaded = st.file_uploader(
         "Upload railML or zip", type=["xml", "railml", "zip"],
         label_visibility="collapsed",
@@ -1580,12 +1607,15 @@ with st.sidebar:
             st.session_state.last_uploaded_id = file_id
         xml_path = st.session_state.xml_path
     else:
-        local = sorted(
+        local_all = sorted(
             glob.glob("*.xml") + glob.glob("*.railml") + glob.glob("*.zip") +
             glob.glob("/tmp/*.xml") + glob.glob("/tmp/*.railml")
         )
-        if local:
-            sel = st.selectbox("Or pick local file", local, label_visibility="collapsed")
+        # Prevent Timetable zips from polluting the railML infrastructure dropdown
+        local_railml = [f for f in local_all if "CZPTT" not in f.upper() and "TIMETABLE" not in f.upper()]
+
+        if local_railml:
+            sel = st.selectbox("Or pick local file", local_railml, label_visibility="collapsed")
             if sel != st.session_state.xml_path:
                 for k, v in _SS_DEFAULTS.items():
                     st.session_state[k] = v
@@ -1619,6 +1649,42 @@ with st.sidebar:
     else:
         st.info("Upload a DYPOD railML file to begin.")
         st.stop()
+
+    st.markdown('<div class="sec">⏱️ Timetable Dataset (CZPTT)</div>', unsafe_allow_html=True)
+    tt_uploaded = st.file_uploader(
+        "Upload CZPTT Timetable (ZIP)", type=["zip"],
+        key="tt_uploader",
+        help="Upload a ZIP of CZPTT XML files to validate simulation times against scheduled timetables (Cached for 24h).",
+        label_visibility="collapsed"
+    )
+
+    tt_path = None
+    if tt_uploaded:
+        tt_file_id = f"{tt_uploaded.name}_{tt_uploaded.size}"
+        if st.session_state.get("last_tt_id") != tt_file_id:
+            with st.spinner("Parsing CZPTT Timetable Dataset (cached for 24h)..."):
+                st.session_state.timetable_db = parse_czptt_timetable_from_bytes(tt_uploaded.getvalue())
+            st.session_state.last_tt_id = tt_file_id
+            st.success(f"✅ Loaded {len(st.session_state.timetable_db):,} segment schedules.")
+    else:
+        # Search for local CZPTT zip files
+        local_tts = sorted(glob.glob("*CZPTT*.zip") + glob.glob("*timetable*.zip"))
+        if local_tts:
+            sel_tt = st.selectbox("Or pick local timetable file", ["None"] + local_tts, label_visibility="collapsed")
+            if sel_tt != "None":
+                tt_file_id = f"local_{sel_tt}"
+                if st.session_state.get("last_tt_id") != tt_file_id:
+                    with st.spinner(f"Parsing local CZPTT Timetable Dataset: {sel_tt} (cached for 24h)..."):
+                        with open(sel_tt, "rb") as f:
+                            st.session_state.timetable_db = parse_czptt_timetable_from_bytes(f.read())
+                    st.session_state.last_tt_id = tt_file_id
+                    st.success(f"✅ Loaded {len(st.session_state.timetable_db):,} segment schedules.")
+            else:
+                st.session_state.timetable_db = None
+                st.session_state.last_tt_id = None
+        else:
+             st.session_state.timetable_db = None
+             st.session_state.last_tt_id = None
 
     st.markdown('<div class="sec">🗺️ Route</div>', unsafe_allow_html=True)
 
@@ -1890,8 +1956,8 @@ if btn_run and st.session_state.profile_df is not None:
                 track_leg = TrackProfile(df_leg)
                 total_leg_stops = len(track_leg.stations)
 
-                hist_leg, snames_leg, stats_leg = sim.run(track_leg, stop_mode=stop_mode, stop_prob=stop_prob, dwell=dwell, record=True)
-                _, _, stats_worst_leg = sim.run(track_leg, stop_mode="all", stop_prob=1.0, dwell=dwell, record=False)
+                hist_leg, snames_leg, sops_leg, stats_leg = sim.run(track_leg, stop_mode=stop_mode, stop_prob=stop_prob, dwell=dwell, record=True)
+                _, _, _, stats_worst_leg = sim.run(track_leg, stop_mode="all", stop_prob=1.0, dwell=dwell, record=False)
 
                 leg_results.append({
                     "leg_num": i + 1,
@@ -1902,6 +1968,7 @@ if btn_run and st.session_state.profile_df is not None:
                     "stats": stats_leg,
                     "stats_worst": stats_worst_leg,
                     "snames": snames_leg,
+                    "sops": sops_leg,
                     "total_possible_stops": total_leg_stops
                 })
 
@@ -1974,7 +2041,7 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
                     run_e = 0.0
                     run_t = 0.0
                     for i, track_leg in enumerate(leg_tracks):
-                        _, _, st_ = sim.run(track_leg, sm, p_val, dwell)
+                        _, _, _, st_ = sim.run(track_leg, sm, p_val, dwell)
                         e_val = to_unit(st_, traction, diesel_d, efficiency)
                         t_val = st_["journey_time_s"]
 
@@ -2412,11 +2479,14 @@ with tab_run_t:
             st.markdown("Compare the physics engine's absolute peak-performance times against the scheduled CZPTT passenger timetables. Any time difference reveals the mathematical **operational slack** (buffer time) embedded in real timetables.")
             if st.button("Validate Schedule", key=f"val_btn_{leg.get('leg_num', 1)}"):
                 snames_exec = leg.get("snames", [])
-                arr_times = leg_stats.get("arrival_times", {})
+                sops_exec   = leg.get("sops", [])
+                arr_times   = leg_stats.get("arrival_times", {})
 
                 start_st = leg.get("start_name", "")
                 if start_st and snames_exec and snames_exec[0] != start_st:
+                    # Sync missing origin names/ops if dropped by validation
                     snames_exec = [start_st] + snames_exec
+                    sops_exec = [terminals[leg.get("leg_num", 1)-1]] + sops_exec
 
                 rows = []
                 prev_dep_time = 0.0
@@ -2424,6 +2494,12 @@ with tab_run_t:
 
                 for i in range(len(snames_exec) - 1):
                     st_a, st_b = snames_exec[i], snames_exec[i+1]
+                    op_a, op_b = sops_exec[i], sops_exec[i+1]
+
+                    # Extract the absolute CRD/SR70 Codes derived from the railML infrastructure elements
+                    sr70_a = parser.op_info.get(op_a, {}).get("sr70", "")
+                    sr70_b = parser.op_info.get(op_b, {}).get("sr70", "")
+
                     arr_b = arr_times.get(st_b, 0.0)
 
                     sim_s = arr_b - prev_dep_time
@@ -2433,13 +2509,19 @@ with tab_run_t:
                     src = ""
 
                     if tt_db:
-                        sched_s = tt_db.get((st_a.lower(), st_b.lower()))
+                        # Priority 1: Exact CRD / SR70 Code Match (Absolute perfection)
+                        if sr70_a and sr70_b:
+                            sched_s = tt_db.get((sr70_a, sr70_b))
+
+                        # Priority 2: String Name Fallback Match (If SR70 is missing from XML)
+                        if sched_s is None:
+                            sched_s = tt_db.get((st_a.lower(), st_b.lower()))
 
                     if sched_s is not None:
-                        src = "CZPTT Timetable Data"
+                        src = "CZPTT Match"
                     else:
                         sched_s = sim_s * 1.12
-                        src = "12% Slack Fallback (No Match)"
+                        src = "12% Slack Fallback"
 
                     diff_s = sched_s - sim_s
                     rows.append({
@@ -2454,7 +2536,6 @@ with tab_run_t:
                 else: st.warning("Not enough stops served to calculate segment times.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TAB 4 – MONTE CARLO
