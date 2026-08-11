@@ -29,6 +29,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 
+# STREAMLIT_CHUNK:Defining color palette and constants...
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
     primary="#2563EB", secondary="#7C3AED", accent="#EA580C",
@@ -47,6 +48,7 @@ PASSENGER_TYPES = {"station", "stoppingPoint"}
 MANDATORY_TYPES = {"station"}
 REQUEST_TYPES   = {"stoppingPoint"}
 
+# STREAMLIT_CHUNK:Initializing vehicle fleet presets...
 # ── vehicle fleet ─────────────────────────────────────────────────────────────
 PREDEFINED_VEHICLES: dict[str, dict] = {
     "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
@@ -59,6 +61,7 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
     "Pendolino (Class 680)":       dict(traction="ELECTRIC",mass=380_000, length=157.9,  power=5_500, aux_power=200,accel=0.8, decel=1.0, efficiency=0.87, max_speed=200, systems=["3,000V/0Hz", "25,000V/50Hz", "15,000V/16.7Hz"]),
 }
 
+# STREAMLIT_CHUNK:Building helper and extraction functions...
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS & DATA EXTRACTORS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,10 +72,19 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
     def normalize_name(n: str) -> str:
         if not n: return ""
         n = n.lower().replace("-", " ")
-        # Strip out common Czech naming inconsistencies
-        for bad in [" zastávka", " hl.n.", " hlavní nádraží", " dvorana", " město", " z"]:
-            n = n.replace(bad, "")
-        return n.strip()
+        # Advanced Czech station name normalization & abbreviation expansion
+        replacements = [
+            (" zastávka", ""), (" hl.n.", ""), (" hlavní nádraží", ""),
+            (" dvorana", ""), (" město", ""), (" z", ""),
+            ("n. ", "nad "), ("p. ", "pod "), ("u ", "u "),
+            ("ostr.", "ostravicí"), ("frýdl.", "frýdlant"),
+            (".", " ")  # Remove trailing dots from abbreviations
+        ]
+        for bad, good in replacements:
+            n = n.replace(bad, good)
+
+        # Remove extra whitespace and clean up
+        return " ".join(n.split())
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
         xml_files = [n for n in zf.namelist() if n.lower().endswith(('.xml', '.railml'))]
@@ -138,6 +150,12 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                                     pair_norm = (norm_a, norm_b)
                                     if pair_norm not in segment_times or delta < segment_times[pair_norm]:
                                         segment_times[pair_norm] = delta
+
+                                # Priority 4: Super-fuzzy (first 5 characters match) for extreme abbreviations
+                                if len(norm_a) >= 5 and len(norm_b) >= 5:
+                                    pair_super = (norm_a[:5], norm_b[:5])
+                                    if pair_super not in segment_times or delta < segment_times[pair_super]:
+                                        segment_times[pair_super] = delta
                 except Exception:
                     pass
     return segment_times
@@ -221,6 +239,7 @@ def _spd_cell_color(v):
     return f"rgba({r},{g},{b},0.25)"
 
 
+# STREAMLIT_CHUNK:Setting up the DYPOD parser class...
 # ─────────────────────────────────────────────────────────────────────────────
 #  DYPOD railML PARSER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -575,6 +594,7 @@ class DYPODParser:
         return self.op_info.get(op_id, {}).get("name", op_id)
 
 
+# STREAMLIT_CHUNK:Building Physics Engine Classes...
 # ─────────────────────────────────────────────────────────────────────────────
 #  TRACK PROFILE  (physics wrapper)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -856,6 +876,7 @@ class TrainSimulator:
         )
 
 
+# STREAMLIT_CHUNK:Building the PDF/ZIP Chart Generators...
 # ─────────────────────────────────────────────────────────────────────────────
 #  CHART EXPORT & GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1519,6 +1540,7 @@ def generate_zip_download() -> bytes:
     return buf.getvalue()
 
 
+# STREAMLIT_CHUNK:Building the Streamlit Page Configuration...
 # ─────────────────────────────────────────────────────────────────────────────
 #  STREAMLIT APP
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1559,6 +1581,7 @@ if isinstance(st.session_state.via_ops, list):
     st.session_state.via_ops = {}
 
 
+# STREAMLIT_CHUNK:Building the Sidebar inputs...
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🚆 DYPOD Simulator")
@@ -1817,6 +1840,7 @@ with st.sidebar:
     else:
         st.button("📦 Download All Results (ZIP)", disabled=True, use_container_width=True)
 
+# STREAMLIT_CHUNK:Building the execution actions...
 # ─── Actions ─────────────────────────────────────────────────────────────────
 if (btn_profile or st.session_state.rebuild_profile) and is_valid_route:
     st.session_state.rebuild_profile = False
@@ -2034,6 +2058,7 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
             if pb is not None: pb.empty()
             st.error(str(e))
 
+# STREAMLIT_CHUNK:Building the application tabs...
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 tab_prof, tab_edit, tab_run_t, tab_mc_t = st.tabs([
     "🗺️ Infrastructure Limits", "✏️ Profile Editor", "▶️ Kinematic Simulation", "🎲 Monte Carlo",
@@ -2301,6 +2326,7 @@ with tab_edit:
         st.info("Build a track profile first (sidebar → **Build Track Profile**).")
 
 
+# STREAMLIT_CHUNK:Building the Kinematic Validation dashboard...
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TAB 3 – KINEMATIC SIMULATION (REPRESENTATIVE RUN)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2426,9 +2452,16 @@ with tab_run_t:
                 def normalize_name(n: str) -> str:
                     if not n: return ""
                     n = n.lower().replace("-", " ")
-                    for bad in [" zastávka", " hl.n.", " hlavní nádraží", " dvorana", " město", " z"]:
-                        n = n.replace(bad, "")
-                    return n.strip()
+                    replacements = [
+                        (" zastávka", ""), (" hl.n.", ""), (" hlavní nádraží", ""),
+                        (" dvorana", ""), (" město", ""), (" z", ""),
+                        ("n. ", "nad "), ("p. ", "pod "), ("u ", "u "),
+                        ("ostr.", "ostravicí"), ("frýdl.", "frýdlant"),
+                        (".", " ")
+                    ]
+                    for bad, good in replacements:
+                        n = n.replace(bad, good)
+                    return " ".join(n.split())
 
                 for i in range(len(snames_exec) - 1):
                     st_a, st_b = snames_exec[i], snames_exec[i+1]
@@ -2462,6 +2495,13 @@ with tab_run_t:
                             sched_s = tt_db.get((normalize_name(st_a), normalize_name(st_b)))
                             if sched_s is not None: src = "CZPTT (Fuzzy Name)"
 
+                        # Priority 4: Super-fuzzy (first 5 characters) Fallback
+                        if sched_s is None:
+                            n_a, n_b = normalize_name(st_a), normalize_name(st_b)
+                            if len(n_a) >= 5 and len(n_b) >= 5:
+                                sched_s = tt_db.get((n_a[:5], n_b[:5]))
+                                if sched_s is not None: src = "CZPTT (Super-Fuzzy 5char)"
+
                     if sched_s is None:
                         sched_s = sim_s * 1.12
                         src = "12% Slack Fallback"
@@ -2482,6 +2522,7 @@ with tab_run_t:
         st.markdown("<hr>", unsafe_allow_html=True)
 
 
+# STREAMLIT_CHUNK:Building the Monte Carlo execution and layout...
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TAB 4 – MONTE CARLO
 # ═══════════════════════════════════════════════════════════════════════════════
