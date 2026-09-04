@@ -29,7 +29,9 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 import difflib
-from timetable_scraper import get_scraped_segment_time
+import requests
+import re
+from bs4 import BeautifulSoup
 
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
@@ -64,6 +66,55 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS & DATA EXTRACTORS
 # ─────────────────────────────────────────────────────────────────────────────
+_segment_cache = {}
+
+def get_scraped_segment_time(origin_station: str, dest_station: str) -> float | None:
+    """Scrapes IDOS.cz for the scheduled duration between two stations."""
+    origin_clean = origin_station.replace(" z.", "").replace(" zast.", "").strip()
+    dest_clean = dest_station.replace(" z.", "").replace(" zast.", "").strip()
+
+    cache_key = f"{origin_clean}_{dest_clean}"
+    if cache_key in _segment_cache:
+        return _segment_cache[cache_key]
+
+    url = "https://idos.idnes.cz/vlaky/spojeni/vysledky/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "cs,en;q=0.9"
+    }
+    params = {
+        "f": origin_clean,
+        "t": dest_clean,
+        "direct": "true"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10.0)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            duration_tags = soup.find_all("p", class_="reset duration")
+
+            for tag in duration_tags:
+                text = tag.get_text().strip()
+                hours = 0
+                minutes = 0
+
+                h_match = re.search(r'(\d+)\s*hod', text)
+                if h_match: hours = int(h_match.group(1))
+
+                m_match = re.search(r'(\d+)\s*min', text)
+                if m_match: minutes = int(m_match.group(1))
+
+                if hours > 0 or minutes > 0:
+                    delta_seconds = float((hours * 3600) + (minutes * 60))
+                    _segment_cache[cache_key] = delta_seconds
+                    time.sleep(0.5) # Polite scraping delay
+                    return delta_seconds
+    except Exception as e:
+        pass
+
+    return None
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
     segment_times = {}
