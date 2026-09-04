@@ -29,6 +29,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 import difflib
+from validation import get_scraped_segment_time
 
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
@@ -1456,13 +1457,6 @@ def generate_zip_download() -> bytes:
                     z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.html", fig_g.to_html(include_plotlyjs='cdn', config=cfg_g))
                     z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.html", fig_e.to_html(include_plotlyjs='cdn', config=cfg_e))
 
-                    try:
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Speed.png", fig_s.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Gradient.png", fig_g.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_{vn}_Leg{lnum}_Energy.png", fig_e.to_image(format="png", scale=4, width=1600, height=900))
-                    except ValueError:
-                        pass # Kaleido missing, gracefully skip PNG
-
         # 3. Monte Carlo
         mc = st.session_state.mc_result
         if mc is not None:
@@ -1498,14 +1492,6 @@ def generate_zip_download() -> bytes:
                 z.writestr(f"{bn}_MonteCarlo_Overall_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t_cfg))
                 z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
 
-                try:
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Savings.png", fig_bar.to_image(format="png", scale=4, width=1600, height=900))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Distribution.png", fig_err.to_image(format="png", scale=4, width=1600, height=900))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Time.png", fig_t.to_image(format="png", scale=4, width=1600, height=900))
-                    z.writestr(f"{bn}_MonteCarlo_Overall_Tradeoff.png", fig_et.to_image(format="png", scale=4, width=1600, height=900))
-                except ValueError:
-                    pass
-
             for l in mc_legs:
                 lnum = l.get("leg_num", "?")
                 ldf = l["df"]
@@ -1534,14 +1520,6 @@ def generate_zip_download() -> bytes:
                     z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.html", fig_err.to_html(include_plotlyjs='cdn', config=cfg_er))
                     z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.html", fig_t.to_html(include_plotlyjs='cdn', config=cfg_t_cfg))
                     z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.html", fig_et.to_html(include_plotlyjs='cdn', config=cfg_et))
-
-                    try:
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Savings.png", fig_bar.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Distribution.png", fig_err.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Time.png", fig_t.to_image(format="png", scale=4, width=1600, height=900))
-                        z.writestr(f"{bn}_MonteCarlo_Leg{lnum}_Tradeoff.png", fig_et.to_image(format="png", scale=4, width=1600, height=900))
-                    except ValueError:
-                        pass
 
     return buf.getvalue()
 
@@ -2553,6 +2531,14 @@ with tab_run_t:
                                     sched_s = norm_pairs[(fuzzy_b, fuzzy_a)]
                                     src = "CZPTT (Fuzzy Reverse Dir)"
 
+                    # Priority 4: Live IDOS Web Scrape
+                    if sched_s is None:
+                        scraped_s = get_scraped_segment_time(st_a, st_b)
+                        if scraped_s is not None:
+                            sched_s = scraped_s
+                            src = "IDOS.cz (Live Scrape)"
+
+                    # Fallback
                     if sched_s is None:
                         sched_s = sim_s * 1.12
                         src = "12% Slack Fallback"

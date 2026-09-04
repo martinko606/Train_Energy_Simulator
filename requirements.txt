@@ -1,9 +1,7 @@
-# DYPOD Track Profile Builder & Fleet Energy Simulator
-# Install: pip install -r requirements.txt
-# Python:  3.10 / 3.11 / 3.12
-
 pandas
 numpy
 plotly
 streamlit
 kaleido==0.2.1
+beautifulsoup4
+requests
