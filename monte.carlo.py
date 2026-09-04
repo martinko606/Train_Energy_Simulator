@@ -54,7 +54,7 @@ PREDEFINED_VEHICLES: dict[str, dict] = {
     "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "EDITA+Btax":                  dict(traction="DIESEL",  mass=42_000,  length=30,     power=250,   aux_power=25, accel=0.4, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "Regionova (Class 814)":       dict(traction="DIESEL",  mass=39_600,  length=28.44,  power=242,   aux_power=10, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
-    "RegioNova Duo (Class 840)":   dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=514,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=80, systems=[]),
+    "RegioNova Duo (Class 840)":   dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=514,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=100, systems=[]),
     "750-7 + 3 coaches":           dict(traction="DIESEL",  mass=207_000, length=90.16,  power=1_550, aux_power=40, accel=0.4, decel=0.8, efficiency=0.30, max_speed=100, systems=[]),
     "Regiopanter 3-car (Cl. 640)": dict(traction="ELECTRIC",mass=159_000, length=79.4,   power=2_040, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz", "25,000V/50Hz"]),
     "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=155_000, length=79,     power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz"]),
@@ -2531,14 +2531,13 @@ with tab_run_t:
                                     sched_s = norm_pairs[(fuzzy_b, fuzzy_a)]
                                     src = "CZPTT (Fuzzy Reverse Dir)"
 
-                    # Priority 4: Live IDOS Web Scrape
                     if sched_s is None:
-                        scraped_s = get_scraped_segment_time(st_a, st_b)
+                        # 4th Priority: Live IDOS Web Scrape
+                        scraped_s = get_scraped_segment_time(norm_a, norm_b)
                         if scraped_s is not None:
                             sched_s = scraped_s
                             src = "IDOS.cz (Live Scrape)"
 
-                    # Fallback
                     if sched_s is None:
                         sched_s = sim_s * 1.12
                         src = "12% Slack Fallback"
