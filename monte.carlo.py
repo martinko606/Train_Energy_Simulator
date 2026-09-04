@@ -29,7 +29,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 import difflib
-from validation import get_scraped_segment_time
+from timetable_scraper import get_scraped_segment_time
 
 # ── colour palette ────────────────────────────────────────────────────────────
 C = dict(
@@ -200,8 +200,8 @@ def parse_gtfs_timetable_from_bytes(zip_bytes: bytes) -> dict:
                         if current_trip is not None and len(trip_stops) > 1:
                             # We only care about directly adjacent stops for physics validation
                             for i in range(len(trip_stops) - 1):
-                                stop_a, dep_a = trip_stops[i]
-                                stop_b, arr_b = trip_stops[i+1]
+                                stop_a, _, dep_a = trip_stops[i]
+                                stop_b, arr_b, _ = trip_stops[i+1]
 
                                 name_a = stop_map.get(stop_a)
                                 name_b = stop_map.get(stop_b)
