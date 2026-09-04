@@ -2687,7 +2687,9 @@ with tab_run_t:
 
                     if sched_s is None:
                         # 4th Priority: Live IDOS Web Scrape
-                        scraped_s = get_scraped_segment_time(norm_a, norm_b)
+                        # CRITICAL FIX: Pass the original station names (st_a, st_b) to IDOS,
+                        # NOT the stripped 'norm_a'/'norm_b' which confuse the search engine!
+                        scraped_s = get_scraped_segment_time(st_a, st_b)
                         if scraped_s is not None:
                             sched_s = scraped_s
                             src = "IDOS.cz (Live Scrape)"
