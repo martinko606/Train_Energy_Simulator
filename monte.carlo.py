@@ -148,6 +148,99 @@ def parse_czptt_timetable_from_bytes(zip_bytes: bytes) -> dict:
                     pass
     return segment_times
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def parse_gtfs_timetable_from_bytes(zip_bytes: bytes) -> dict:
+    import csv
+    segment_times = {}
+
+    def super_normalize(n: str) -> str:
+        if not n: return ""
+        n = n.lower().replace("-", " ")
+        replacements = {
+            " z ": " zastavka ", " z.": " zastavka", " zast.": " zastavka", " zast ": " zastavka ",
+            " n.": " nad ", " p.": " pod ", " hl.n.": " hlavni nadrazi"
+        }
+        for k, v in replacements.items():
+            n = n.replace(k, v)
+        for noise in ["ahr", "nz", "odb", "vyh", "zastavka", "hlavni nadrazi"]:
+            n = n.replace(noise, "")
+        n = n.replace(".", " ")
+        words = [w for w in n.split() if len(w) > 1]
+        return " ".join(words).strip()
+
+    def time_to_sec(t_str: str) -> int:
+        try:
+            h, m, s = map(int, t_str.strip().split(':'))
+            return h * 3600 + m * 60 + s
+        except:
+            return 0
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+        # 1. Build Stop ID to Normalized Name mapping
+        stop_map = {}
+        if 'stops.txt' in zf.namelist():
+            with zf.open('stops.txt') as f:
+                reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8-sig'))
+                for row in reader:
+                    stop_map[row['stop_id']] = super_normalize(row.get('stop_name', ''))
+
+        # 2. Extract sequences and calculate deltas
+        if 'stop_times.txt' in zf.namelist():
+            current_trip = None
+            trip_stops = []
+
+            with zf.open('stop_times.txt') as f:
+                reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8-sig'))
+                # GTFS stop_times are usually sorted by trip_id, then stop_sequence
+                for row in reader:
+                    trip_id = row['trip_id']
+
+                    if trip_id != current_trip:
+                        # Process previous trip before starting new one
+                        if current_trip is not None and len(trip_stops) > 1:
+                            # We only care about directly adjacent stops for physics validation
+                            for i in range(len(trip_stops) - 1):
+                                stop_a, dep_a = trip_stops[i]
+                                stop_b, arr_b = trip_stops[i+1]
+
+                                name_a = stop_map.get(stop_a)
+                                name_b = stop_map.get(stop_b)
+
+                                if name_a and name_b:
+                                    delta = arr_b - dep_a
+                                    if delta > 0:
+                                        pair = (name_a, name_b)
+                                        if pair not in segment_times or delta < segment_times[pair]:
+                                            segment_times[pair] = delta
+
+                        current_trip = trip_id
+                        trip_stops = []
+
+                    # Accumulate stops for current trip
+                    arr_s = time_to_sec(row['arrival_time'])
+                    dep_s = time_to_sec(row['departure_time'])
+                    trip_stops.append((row['stop_id'], dep_s))
+                    # Note: We append dep_s but when parsing adjacent stops above,
+                    # we treat the dep_s of stop_b as its arr_s for simplicity,
+                    # assuming short dwells. Let's fix that by storing both.
+                    trip_stops[-1] = (row['stop_id'], arr_s, dep_s)
+
+                # Process the very last trip in the file
+                if current_trip is not None and len(trip_stops) > 1:
+                    for i in range(len(trip_stops) - 1):
+                        stop_a, _, dep_a = trip_stops[i]
+                        stop_b, arr_b, _ = trip_stops[i+1]
+                        name_a = stop_map.get(stop_a)
+                        name_b = stop_map.get(stop_b)
+                        if name_a and name_b:
+                            delta = arr_b - dep_a
+                            if delta > 0:
+                                pair = (name_a, name_b)
+                                if pair not in segment_times or delta < segment_times[pair]:
+                                    segment_times[pair] = delta
+
+    return segment_times
+
 def clean_name(name: str) -> str:
     if pd.isna(name) or not name: return "Unknown"
     return "".join([c if c.isalnum() else "_" for c in str(name)])
@@ -1641,7 +1734,7 @@ with st.sidebar:
         tt_bytes = tt_uploaded.getvalue()
     else:
         all_zips = sorted(glob.glob("*.zip") + glob.glob("/tmp/*.zip"))
-        tt_local = [f for f in all_zips if "CZPTT" in f or "timetable" in f.lower()]
+        tt_local = [f for f in all_zips if "CZPTT" in f or "timetable" in f.lower() or "gtfs" in f.lower()]
         if tt_local:
             tt_sel = st.selectbox("Or pick local timetable file", tt_local, label_visibility="collapsed")
             if tt_sel:
@@ -1650,10 +1743,20 @@ with st.sidebar:
 
     if tt_bytes:
         try:
-            with st.spinner("Extracting CZPTT Database..."):
-                tt_db = parse_czptt_timetable_from_bytes(tt_bytes)
+            with st.spinner("Analyzing Timetable Database..."):
+                is_gtfs = False
+                with zipfile.ZipFile(io.BytesIO(tt_bytes), 'r') as zf:
+                    if 'stop_times.txt' in zf.namelist():
+                        is_gtfs = True
+
+                if is_gtfs:
+                    tt_db = parse_gtfs_timetable_from_bytes(tt_bytes)
+                    st.success(f"✅ Loaded {len(tt_db):,} schedule segments from GTFS.")
+                else:
+                    tt_db = parse_czptt_timetable_from_bytes(tt_bytes)
+                    st.success(f"✅ Loaded {len(tt_db):,} schedule segments from CZPTT.")
+
             st.session_state["timetable_db"] = tt_db
-            st.success(f"✅ Loaded {len(tt_db):,} schedule segments.")
         except Exception as e:
             st.error(f"Error parsing timetable: {e}")
 
