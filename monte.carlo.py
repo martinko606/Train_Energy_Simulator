@@ -1702,7 +1702,7 @@ with st.sidebar:
     if COMPANY_LOGO_PATH and os.path.exists(COMPANY_LOGO_PATH):
         st.image(COMPANY_LOGO_PATH, width=200)
 
-    st.markdown("## 🚆 DYPOD Simulator")
+    st.markdown("## 🚆 Stop on Demand Simulator")
     st.caption("Czech railway track profile & energy analysis")
     st.markdown("---")
 
