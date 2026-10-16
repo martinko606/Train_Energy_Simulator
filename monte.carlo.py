@@ -1700,7 +1700,7 @@ if isinstance(st.session_state.via_ops, list):
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     if COMPANY_LOGO_PATH and os.path.exists(COMPANY_LOGO_PATH):
-        st.image(COMPANY_LOGO_PATH, use_container_width=True)
+        st.image(COMPANY_LOGO_PATH, width=400)
 
     st.markdown("## 🚆 DYPOD Simulator")
     st.caption("Czech railway track profile & energy analysis")
