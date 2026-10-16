@@ -51,12 +51,14 @@ PASSENGER_TYPES = {"station", "stoppingPoint"}
 MANDATORY_TYPES = {"station"}
 REQUEST_TYPES   = {"stoppingPoint"}
 
+COMPANY_LOGO_PATH = "777-azd-rgb (1).png" # Add the path to your company logo here (e.g., "logo.png")
+
 # ── vehicle fleet ─────────────────────────────────────────────────────────────
 PREDEFINED_VEHICLES: dict[str, dict] = {
     "EDITA (diesel railcar)":      dict(traction="DIESEL",  mass=22_000,  length=15,     power=250,   aux_power=20, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "EDITA+Btax":                  dict(traction="DIESEL",  mass=42_000,  length=30,     power=250,   aux_power=25, accel=0.4, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
     "Regionova (Class 814)":       dict(traction="DIESEL",  mass=39_600,  length=28.44,  power=242,   aux_power=10, accel=0.5, decel=0.8, efficiency=0.30, max_speed=80, systems=[]),
-    "Regiospider (Class 840)":     dict(traction="DIESEL",  mass=50_000,  length=25.5,   power=530,   aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=120, systems=[]),
+    "Regiospider (Class 840)":     dict(traction="DIESEL", mass=50_000, length=25.5, power=530, aux_power=25, accel=0.8, decel=0.9, efficiency=0.38, max_speed=120, systems=[]),
     "750-7 + 3 coaches":           dict(traction="DIESEL",  mass=207_000, length=90.16,  power=1_550, aux_power=40, accel=0.4, decel=0.8, efficiency=0.30, max_speed=100, systems=[]),
     "Regiopanter 3-car (Cl. 640)": dict(traction="ELECTRIC",mass=159_000, length=79.4,   power=2_040, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz", "25,000V/50Hz"]),
     "CityElefant (Class 471)":     dict(traction="ELECTRIC",mass=155_000, length=79,     power=2_000, aux_power=80, accel=0.8, decel=0.9, efficiency=0.85, max_speed=160, systems=["3,000V/0Hz"]),
@@ -337,11 +339,11 @@ def kpi_card(val: str, lbl: str, delta: str = "", color: str = C["primary"]) -> 
     d = (f'<div style="font-size:.72rem;color:{color};margin-top:2px;'
          f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{delta}</div>') if delta else ""
     return (
-        f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;'
+        f'<div style="background:var(--secondary-background-color);border:1px solid rgba(128,128,128,0.2);border-radius:10px;'
         f'padding:12px 14px;text-align:center;height:88px;display:flex;'
         f'flex-direction:column;justify-content:center;overflow:hidden">'
-        f'<div style="font-size:1.35rem;font-weight:700;color:#1E3A5F;line-height:1.2">{val}</div>'
-        f'<div style="font-size:.72rem;color:#64748B;margin-top:2px">{lbl}</div>'
+        f'<div style="font-size:1.35rem;font-weight:700;color:var(--text-color);line-height:1.2">{val}</div>'
+        f'<div style="font-size:.72rem;color:var(--text-color);opacity:0.8;margin-top:2px">{lbl}</div>'
         f'{d}</div>'
     )
 
@@ -1148,19 +1150,19 @@ def make_profile_chart(df: pd.DataFrame, vehicle_max_speed: float = None) -> go.
         spd_lo = min(spd_lo, max(0, vehicle_max_speed * 0.75))
         spd_hi = max(spd_hi, vehicle_max_speed * 1.1)
 
-    fig.update_xaxes(title_text="Distance from departure [km]", row=3, col=1, gridcolor=C["light"])
-    fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1, gridcolor=C["light"], range=[spd_lo, spd_hi])
-    fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1, gridcolor=C["light"], zeroline=True, zerolinecolor="#CBD5E1")
+    fig.update_xaxes(title_text="Distance from departure [km]", row=3, col=1)
+    fig.update_yaxes(title_text="Speed [km/h]", row=1, col=1, range=[spd_lo, spd_hi])
+    fig.update_yaxes(title_text="Gradient [‰]", row=2, col=1, zeroline=True)
     fig.update_yaxes(showticklabels=False, row=3, col=1, range=[0, 1.1])
 
     fig.update_layout(
-        height=800, barmode="overlay", paper_bgcolor="white", plot_bgcolor="white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0, bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
+        height=800, barmode="overlay",
+        legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0, borderwidth=1),
         margin=dict(t=100, b=10, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
         hovermode="x unified",
     )
-    fig.update_xaxes(gridcolor=C["light"], showgrid=True)
+    fig.update_xaxes(showgrid=True)
     return fig
 
 def make_route_map(df: pd.DataFrame, via_ops: list, parser: DYPODParser, show_halts: bool = True) -> go.Figure:
@@ -1335,14 +1337,11 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
     fig_speed.update_layout(
         height=450, margin=dict(l=60, r=40, t=20, b=220), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
-                    bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0, borderwidth=1),
         shapes=shapes_speed, annotations=annotations_speed,
-        paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=180), range=[x_min, x_max], tickformat=x_fmt, showgrid=True,
-                   gridcolor=C["light"], showticklabels=True),
-        yaxis=dict(title_text="Speed [km/h]", showgrid=True, gridcolor=C["light"])
+        xaxis=dict(title=dict(text=x_title, standoff=180), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, showticklabels=True),
+        yaxis=dict(title_text="Speed [km/h]", showgrid=True)
     )
 
     # 2. GRADIENT CHART
@@ -1362,12 +1361,9 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
     fig_grad.update_layout(
         height=320, margin=dict(l=60, r=40, t=20, b=220), hovermode="x unified",
         shapes=shapes_grad,
-        paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=180), range=[x_min, x_max], tickformat=x_fmt, showgrid=True,
-                   gridcolor=C["light"], showticklabels=True),
-        yaxis=dict(title_text="Gradient [‰]", showgrid=True, gridcolor=C["light"], zeroline=True,
-                   zerolinecolor="#CBD5E1")
+        xaxis=dict(title=dict(text=x_title, standoff=180), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, showticklabels=True),
+        yaxis=dict(title_text="Gradient [‰]", showgrid=True, zeroline=True)
     )
 
     # 3. ENERGY CHART
@@ -1383,14 +1379,11 @@ def make_kinematic_charts(hist: dict, stop_names: list[str],
 
     fig_energy.update_layout(
         height=450, margin=dict(l=60, r=40, t=20, b=220), hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
-                    bgcolor="rgba(255,255,255,0.9)", bordercolor="#E2E8F0", borderwidth=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0, borderwidth=1),
         shapes=shapes_energy, annotations=annotations_energy,
-        paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="Inter, sans-serif", size=12),
-        xaxis=dict(title=dict(text=x_title, standoff=180), range=[x_min, x_max], tickformat=x_fmt, showgrid=True,
-                   gridcolor=C["light"], showticklabels=True),
-        yaxis=dict(title_text="Energy [kWh]", showgrid=True, gridcolor=C["light"])
+        xaxis=dict(title=dict(text=x_title, standoff=180), range=[x_min, x_max], tickformat=x_fmt, showgrid=True, showticklabels=True),
+        yaxis=dict(title_text="Energy [kWh]", showgrid=True)
     )
 
     return fig_speed, fig_grad, fig_energy
@@ -1408,10 +1401,9 @@ def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, 
     fig_bar.update_layout(
         xaxis_title="Request-stop probability",
         yaxis_title=f"Savings [{ul}]",
-        height=400, paper_bgcolor="white", plot_bgcolor="white",
+        height=400,
         margin=dict(t=30, b=50, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
-        yaxis=dict(gridcolor=C["light"]),
     )
 
     # 2. Error
@@ -1438,10 +1430,9 @@ def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, 
     fig_err.update_layout(
         xaxis_title="Request-stop probability",
         yaxis_title=f"Energy [{ul}]",
-        height=400, paper_bgcolor="white", plot_bgcolor="white",
+        height=400,
         margin=dict(t=30, b=50, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
-        yaxis=dict(gridcolor=C["light"]),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
 
@@ -1462,10 +1453,9 @@ def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, 
     fig_t.update_layout(
         xaxis_title="Request-stop probability",
         yaxis_title="Journey time [min]",
-        height=360, paper_bgcolor="white", plot_bgcolor="white",
+        height=360,
         margin=dict(t=30, b=50, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
-        yaxis=dict(gridcolor=C["light"]),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
 
@@ -1488,7 +1478,7 @@ def make_mc_charts(mc_df: pd.DataFrame, ul: str) -> tuple[go.Figure, go.Figure, 
     fig_et.update_layout(
         xaxis_title="Mean journey time [min]",
         yaxis_title=f"Mean energy [{ul}]",
-        height=420, paper_bgcolor="white", plot_bgcolor="white",
+        height=420,
         margin=dict(t=30, b=50, l=60, r=20),
         font=dict(family="Inter, sans-serif", size=12),
     )
@@ -1675,22 +1665,21 @@ st.set_page_config(
     page_title="DYPOD Simulator", page_icon="🚆", layout="wide"
 )
 st.markdown("""<style>
-[data-testid="stSidebar"]{background:#F1F5F9}
 .stButton>button{border-radius:8px;font-weight:600;transition:all .15s}
 .stButton>button:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.15)}
 .block-container{padding-top:2.5rem}
 .stTabs [data-baseweb="tab"]{font-weight:600;font-size:.92rem}
-h3{color:#1E3A5F;font-size:1.2rem}
-.sec{font-size:.92rem;font-weight:700;color:#1E3A5F;
+h3{color:var(--text-color);font-size:1.2rem}
+.sec{font-size:.92rem;font-weight:700;color:var(--text-color);
      border-left:3px solid #2563EB;padding-left:8px;margin:14px 0 6px}
-.info-box{background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;
-          padding:10px 14px;font-size:.85rem;color:#1E40AF;margin:8px 0}
-.warn-box{background:#FEF9C3;border:1px solid #FDE047;border-radius:8px;
-          padding:10px 14px;font-size:.85rem;color:#713F12;margin:8px 0}
-.danger-box{background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;
-            padding:10px 14px;font-size:.85rem;color:#7F1D1D;margin:8px 0}
-.ok-box{background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;
-        padding:10px 14px;font-size:.85rem;color:#14532D;margin:8px 0}
+.info-box{background:var(--secondary-background-color);border:1px solid var(--primary-color);border-radius:8px;
+          padding:10px 14px;font-size:.85rem;margin:8px 0}
+.warn-box{background:var(--secondary-background-color);border:1px solid #FDE047;border-radius:8px;
+          padding:10px 14px;font-size:.85rem;margin:8px 0}
+.danger-box{background:var(--secondary-background-color);border:1px solid #FECACA;border-radius:8px;
+            padding:10px 14px;font-size:.85rem;margin:8px 0}
+.ok-box{background:var(--secondary-background-color);border:1px solid #BBF7D0;border-radius:8px;
+        padding:10px 14px;font-size:.85rem;margin:8px 0}
 </style>""", unsafe_allow_html=True)
 
 _SS_DEFAULTS = dict(
@@ -1710,6 +1699,9 @@ if isinstance(st.session_state.via_ops, list):
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
+    if COMPANY_LOGO_PATH and os.path.exists(COMPANY_LOGO_PATH):
+        st.image(COMPANY_LOGO_PATH, use_container_width=True)
+
     st.markdown("## 🚆 DYPOD Simulator")
     st.caption("Czech railway track profile & energy analysis")
     st.markdown("---")
@@ -2165,12 +2157,16 @@ if btn_mc and st.session_state.profile_df is not None and mc_probs:
 
             mc_df_overall = pd.DataFrame(rows_mc_overall)
             mc_df_overall["savings"] = (mc_df_overall["mean_e"].max() - mc_df_overall["mean_e"]).clip(lower=0)
+            max_e = mc_df_overall["mean_e"].max()
+            mc_df_overall["savings_pct"] = (mc_df_overall["savings"] / max_e * 100).fillna(0) if max_e > 0 else 0
             mc_df_overall["unit"] = unit_lbl
 
             legs_results = []
             for i in range(len(leg_tracks)):
                 df_l = pd.DataFrame(rows_mc_legs[i])
                 df_l["savings"] = (df_l["mean_e"].max() - df_l["mean_e"]).clip(lower=0)
+                l_max_e = df_l["mean_e"].max()
+                df_l["savings_pct"] = (df_l["savings"] / l_max_e * 100).fillna(0) if l_max_e > 0 else 0
                 df_l["unit"] = unit_lbl
 
                 s_name = leg_tracks[i].df["station_name"].iloc[0] if not leg_tracks[i].df.empty else ""
@@ -2301,20 +2297,19 @@ with tab_prof:
         fig_tbl = go.Figure(go.Table(
             columnwidth=[55,200,80,80,70,160,70],
             header=dict(values=["km","Waypoint","Track Spd","Eff. Spd","Grad [‰]","Electrif.","Tracks"],
-                        fill_color=C["dark"], font=dict(color="white",size=12),
                         align="left", height=28),
             cells=dict(values=[spd_df["cum_km"].round(2), labels,
                                 spd_df["speed_kmh"].astype(int),
                                 spd_df["eff_speed"].astype(int),
                                 spd_df["gradient_perm"].round(1),
                                 spd_df["electrification"], spd_df["n_tracks"]],
-                        fill_color=[["#F8FAFC"]*len(spd_df), ["#F8FAFC"]*len(spd_df),
-                                    ["#F8FAFC"]*len(spd_df),
+                        fill_color=[["rgba(0,0,0,0)"]*len(spd_df), ["rgba(0,0,0,0)"]*len(spd_df),
+                                    ["rgba(0,0,0,0)"]*len(spd_df),
                                     [_sclr(v) for v in spd_df["eff_speed"]],
-                                    ["#F8FAFC"]*len(spd_df),
-                                    ["#F8FAFC"]*len(spd_df),
-                                    ["#F8FAFC"]*len(spd_df)],
-                        font=dict(size=11), align="left", height=24)))
+                                    ["rgba(0,0,0,0)"]*len(spd_df),
+                                    ["rgba(0,0,0,0)"]*len(spd_df),
+                                    ["rgba(0,0,0,0)"]*len(spd_df)],
+                        align="left", height=24)))
         fig_tbl.update_layout(height=min(60+len(spd_df)*26,440),
                                margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig_tbl, use_container_width=True, key="speed_table_tab1", config=get_chart_config(f"{get_base_filename()}_SpeedSummary"))
@@ -2779,11 +2774,15 @@ with tab_mc_t:
         disp["Mean time"] = disp["mean_t"].apply(fmt_dur)
         disp["Fastest"]   = disp["min_t"].apply(fmt_dur)
         disp["Slowest"]   = disp["max_t"].apply(fmt_dur)
+        if "savings_pct" in disp.columns:
+            disp["savings_pct"] = disp["savings_pct"].apply(lambda x: f"{x:.1f}%")
+
         show_map = {
             "prob": "Probability",
             "mean_e": f"Mean [{ul}]",  "std_e": f"Std [{ul}]",
             "min_e":  f"Min [{ul}]",   "max_e": f"Max [{ul}]",
             "savings": f"Savings [{ul}]",
+            "savings_pct": "% Saved",
             "Mean time": "Mean time",  "Fastest": "Fastest", "Slowest": "Slowest",
         }
         disp2 = disp.rename(columns=show_map)
